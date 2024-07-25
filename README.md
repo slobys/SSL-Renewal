@@ -1,10 +1,10 @@
 # SSL一键申请
-[![build](https://github.com/nanqinlang/SVG/blob/master/build%20passing.svg)](https://github.com/nanqinlang-script/acme)
-[![language](https://github.com/nanqinlang/SVG/blob/master/language-shell-blue.svg)](https://github.com/nanqinlang-script/acme)
-[![author](https://github.com/nanqinlang/SVG/blob/master/author-nanqinlang-lightgrey.svg)](https://github.com/nanqinlang-script/acme)
-[![license](https://github.com/nanqinlang/SVG/blob/master/license-GPLv3-orange.svg)](https://github.com/nanqinlang-script/acme)
+## 脚本功能
+1、一键申请SSL证书
+2、关闭防火墙/放行端口
+3、选择SSL证书颁发机构（增加申请成功率）
+4、证书自动续期（正在优化）
 
-`SSL Certificates` creater script
 
 ## usage
 ```bash
