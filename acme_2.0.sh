@@ -115,6 +115,14 @@ acme.sh --register-account -m $EMAIL --server $CA_SERVER
 # 申请 SSL 证书（使用用户提供的域名）
 acme.sh --issue --standalone -d $DOMAIN --server $CA_SERVER
 
+# 申请 SSL 证书（使用用户提供的域名）
+if ! acme.sh --issue --standalone -d $DOMAIN --server $CA_SERVER; then
+    echo "证书申请失败，删除已生成的文件和文件夹。"
+    rm -f /root/${DOMAIN}.key /root/${DOMAIN}.crt
+    ~/.acme.sh/acme.sh --remove -d $DOMAIN
+    continue
+fi
+
 # 安装 SSL 证书
 ~/.acme.sh/acme.sh --installcert -d $DOMAIN \
     --key-file       /root/${DOMAIN}.key \
