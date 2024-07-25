@@ -14,11 +14,13 @@ sudo apt install git -y
 ```
 sudo yum install git -y
 ```
-* （Debian/Ubuntu系统）如果执行后出错，请先更新系统
+
+### 如果执行后出错，请先更新系统
+* （Debian/Ubuntu系统）
 ```bash
 sudo apt update -y
 ```
-* （CentOS系统）如果执行后出错，请先更新系统
+* （CentOS系统）
 ```bash
 sudo yum update -y
 ```
