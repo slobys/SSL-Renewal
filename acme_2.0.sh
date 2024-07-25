@@ -3,11 +3,16 @@
 # 确保脚本在遇到错误时退出
 set -e
 
-# 提示用户是否要重新申请证书
-echo "是否要重新申请证书？"
-echo "1) 是"
-echo "2) 否"
-read -p "输入选项 (1 或 2): " RENEW_OPTION
+# 检查系统类型
+if [ -f /etc/os-release ]; then
+    . /etc/os-release
+    OS=$ID
+elif command -v lsb_release >/dev/null 2>&1; then
+    OS=$(lsb_release -si | tr '[:upper:]' '[:lower:]')
+else
+    echo "无法确定操作系统类型，请手动安装依赖项。"
+    exit 1
+fi
 
 # 提示用户输入域名和电子邮件地址
 read -p "请输入域名: " DOMAIN
@@ -36,17 +41,6 @@ case $CA_OPTION in
         exit 1
         ;;
 esac
-
-# 检查系统类型
-if [ -f /etc/os-release ]; then
-    . /etc/os-release
-    OS=$ID
-elif command -v lsb_release >/dev/null 2>&1; then
-    OS=$(lsb_release -si | tr '[:upper:]' '[:lower:]')
-else
-    echo "无法确定操作系统类型，请手动安装依赖项。"
-    exit 1
-fi
 
 # 提示用户是否关闭防火墙
 echo "是否关闭防火墙？"
@@ -118,12 +112,8 @@ chmod +x "$HOME/.acme.sh/acme.sh"
 # 注册帐户（使用用户提供的电子邮件地址）
 acme.sh --register-account -m $EMAIL --server $CA_SERVER
 
-# 申请 SSL 证书或强制重新申请（使用用户提供的域名）
-if [ "$RENEW_OPTION" -eq 1 ]; then
-    acme.sh --renew -d $DOMAIN --force --server $CA_SERVER
-else
-    acme.sh --issue --standalone -d $DOMAIN --server $CA_SERVER
-fi
+# 申请 SSL 证书（使用用户提供的域名）
+acme.sh --issue --standalone -d $DOMAIN --server $CA_SERVER
 
 # 安装 SSL 证书
 ~/.acme.sh/acme.sh --installcert -d $DOMAIN \
@@ -143,5 +133,5 @@ acme.sh --renew -d $DOMAIN --server $CA_SERVER
 EOF
 chmod +x /root/renew_cert.sh
 
-# 创建自动续期的 cron 任务，每天凌晨执行一次
+# 创建自动续期的 cron 任务，每10分钟执行一次
 (crontab -l 2>/dev/null; echo "0 0 * * * /root/renew_cert.sh > /dev/null 2>&1") | crontab -
