@@ -26,8 +26,7 @@ sudo yum update -y
 ```
 ## 一键脚本
 ```bash
-git clone https://github.com/slobys/SSL-Renewal.git /tmp/acme && mv /tmp/acme/* /root
-bash acme_2.0.sh
+git clone https://github.com/slobys/SSL-Renewal.git /tmp/acme && mv /tmp/acme/* /root && bash acme_2.0.sh
 ```
 ## 注意事项  
 * 请不要用同一个域名频繁申请，这样容易出错
