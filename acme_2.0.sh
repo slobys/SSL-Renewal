@@ -61,12 +61,12 @@ if [ "$FIREWALL_OPTION" -eq 2 ]; then
     fi
 fi
 
-# 安装依赖项并关闭防火墙或放行端口
+# 安装依赖项、cron并关闭防火墙或放行端口
 case $OS in
     ubuntu|debian)
         sudo apt update
         sudo apt upgrade -y
-        sudo apt install -y curl socat git
+        sudo apt install -y curl socat git cron
         if [ "$FIREWALL_OPTION" -eq 1 ]; then
             if command -v ufw >/dev/null 2>&1; then
                 sudo ufw disable
@@ -77,13 +77,15 @@ case $OS in
             if command -v ufw >/dev/null 2>&1; then
                 sudo ufw allow $PORT
             else
-                echo "UFW 未安装，请在控制台放行端口"
+                echo "UFW 未安装，跳过放行端口步骤。"
             fi
         fi
         ;;
     centos)
         sudo yum update -y
-        sudo yum install -y curl socat git
+        sudo yum install -y curl socat git cronie
+        sudo systemctl start crond
+        sudo systemctl enable crond
         if [ "$FIREWALL_OPTION" -eq 1 ]; then
             sudo systemctl stop firewalld
             sudo systemctl disable firewalld
