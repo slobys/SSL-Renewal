@@ -5,7 +5,10 @@
 * 选择SSL证书颁发机构（增加申请成功率）  
 * 证书自动续期（正在优化）  
 
-
+##安装git
+```bash
+apt install -y git 
+```
 ## 一键脚本
 ```bash
 git clone https://github.com/slobys/SSL-Renewal.git /tmp/acme && mv /tmp/acme/* /root
