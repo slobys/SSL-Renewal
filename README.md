@@ -6,8 +6,13 @@
 * 证书自动续期  
 
 ## 安装git
+### Debian和Ubuntu系统
 ```bash
 sudo apt install git -y
+```
+### CentOS系统
+```
+sudo yum install git -y
 ```
 * 如果执行后出错，请先更新系统
 ```bash
