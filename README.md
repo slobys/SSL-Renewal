@@ -18,3 +18,9 @@ sudo apt update -y
 git clone https://github.com/slobys/SSL-Renewal.git /tmp/acme && mv /tmp/acme/* /root
 bash acme_2.0.sh
 ```
+## 注意事项  
+* 请不要用同一个域名频繁申请，这样容易出错
+* 如果遇到出错可以参考以下解决办法  
+  1、换个域名申请  
+  2、换个时间再申请  
+  
