@@ -68,9 +68,17 @@ case $OS in
         sudo apt upgrade -y
         sudo apt install -y curl socat git
         if [ "$FIREWALL_OPTION" -eq 1 ]; then
-            sudo ufw disable
+            if command -v ufw >/dev/null 2>&1; then
+                sudo ufw disable
+            else
+                echo "UFW 未安装，跳过关闭防火墙步骤。"
+            fi
         elif [ "$PORT_OPTION" -eq 1 ]; then
-            sudo ufw allow $PORT
+            if command -v ufw >/dev/null 2>&1; then
+                sudo ufw allow $PORT
+            else
+                echo "UFW 未安装，请在控制台放行端口"
+            fi
         fi
         ;;
     centos)
@@ -125,4 +133,3 @@ chmod +x /root/renew_cert.sh
 
 # 创建自动续期的 cron 任务，每10分钟执行一次
 (crontab -l 2>/dev/null; echo "*/10 * * * * /root/renew_cert.sh > /dev/null") | crontab -
-
