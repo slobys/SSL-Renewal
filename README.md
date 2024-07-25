@@ -7,7 +7,11 @@
 
 ## 安装git
 ```bash
-apt install git -y
+sudo apt install git -y
+```
+* 如果执行后出错，请先更新系统
+```bash
+sudo apt update -y
 ```
 ## 一键脚本
 ```bash
