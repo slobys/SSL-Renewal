@@ -8,6 +8,6 @@
 
 ## 一键脚本
 ```bash
-git clone https://github.com/slobys/acme.git /tmp/acme && mv /tmp/acme/* /root
+git clone https://github.com/slobys/SSL-Renewal.git /tmp/acme && mv /tmp/acme/* /root
 bash acme_2.0.sh
 ```
