@@ -113,14 +113,11 @@ chmod +x "$HOME/.acme.sh/acme.sh"
 acme.sh --register-account -m $EMAIL --server $CA_SERVER
 
 # 申请 SSL 证书（使用用户提供的域名）
-acme.sh --issue --standalone -d $DOMAIN --server $CA_SERVER
-
-# 申请 SSL 证书（使用用户提供的域名）
-if ! acme.sh --issue --standalone -d $DOMAIN --server $CA_SERVER; then
+if ! ~/.acme.sh/acme.sh --issue --standalone -d $DOMAIN --server $CA_SERVER; then
     echo "证书申请失败，删除已生成的文件和文件夹。"
     rm -f /root/${DOMAIN}.key /root/${DOMAIN}.crt
     ~/.acme.sh/acme.sh --remove -d $DOMAIN
-    continue
+    exit 1
 fi
 
 # 安装 SSL 证书
@@ -141,5 +138,5 @@ acme.sh --renew -d $DOMAIN --server $CA_SERVER
 EOF
 chmod +x /root/renew_cert.sh
 
-# 创建自动续期的 cron 任务，每10分钟执行一次
+# 创建自动续期的 cron 任务，每天午夜执行一次
 (crontab -l 2>/dev/null; echo "0 0 * * * /root/renew_cert.sh > /dev/null 2>&1") | crontab -
