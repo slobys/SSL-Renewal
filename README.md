@@ -7,7 +7,7 @@
 
 ## 安装git
 ```bash
-apt install -y git 
+apt install git -y
 ```
 ## 一键脚本
 ```bash
