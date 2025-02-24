@@ -106,6 +106,9 @@ curl https://get.acme.sh | sh
 # 使 acme.sh 脚本可用
 export PATH="$HOME/.acme.sh:$PATH"
 
+# **更新 acme.sh 到最新版本**
+/root/.acme.sh/acme.sh --upgrade
+
 # 添加执行权限
 chmod +x "$HOME/.acme.sh/acme.sh"
 
