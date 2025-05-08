@@ -35,16 +35,12 @@ mv /tmp/acme/* /root
 # ========= 设置执行权限 =========
 chmod +x /root/acme_3.0.sh
 
-# ========= 执行主脚本并输出日志 =========
-echo "🚀 正在执行 /root/acme_3.0.sh ..."
+# ========= 执行主脚本（通过虚拟终端） =========
+echo "🚀 正在以终端方式执行 /root/acme_3.0.sh ..."
 if [ -f /root/acme_3.0.sh ]; then
-    bash /root/acme_3.0.sh
-    STATUS=$?
-    if [ "$STATUS" -eq 0 ]; then
-        echo "✅ acme_3.0.sh 执行完成。"
-    else
-        echo "❌ acme_3.0.sh 执行失败，退出码：$STATUS"
-    fi
+    # 使用 script 模拟交互式终端运行
+    script -q -c "/root/acme_3.0.sh" /dev/null
+    echo "✅ acme_3.0.sh 已成功执行。"
 else
     echo "❌ 找不到 /root/acme_3.0.sh 文件，请检查是否移动成功。"
     exit 1
