@@ -5,12 +5,12 @@ set -e
 # ✅ 开始前自动清理 /tmp/acme（避免 git clone 或其他冲突）
 [ -d /tmp/acme ] && rm -rf /tmp/acme
 
-# 主循环菜单
+# 主菜单循环
 while true; do
     echo ""
     echo "============== SSL证书管理菜单 =============="
     echo "1) 申请SSL证书"
-    echo "2) 移除申请证书时所生成的文件"
+    echo "2) 移除申请证书时所生成的文件（彻底清除）"
     echo "3) 退出"
     echo "============================================"
     read -p "请输入选项 (1-3): " MAIN_OPTION
@@ -21,17 +21,27 @@ while true; do
             ;;
         2)
             read -p "请输入要移除证书的域名: " DOMAIN_TO_REMOVE
-            rm -f /root/${DOMAIN_TO_REMOVE}.key /root/${DOMAIN_TO_REMOVE}.crt /root/renew_cert.sh
-            ~/.acme.sh/acme.sh --remove -d $DOMAIN_TO_REMOVE || echo "acme.sh 中未注册该域名，跳过"
-            echo "相关证书文件和配置已移除。"
+            read -p "⚠️ 确认删除 ${DOMAIN_TO_REMOVE} 的所有证书配置？(y/n): " confirm
+            if [[ "$confirm" != "y" ]]; then
+                echo "已取消操作。"
+                continue
+            fi
+
+            # 删除证书文件、续期脚本和 acme.sh 配置目录
+            rm -f /root/${DOMAIN_TO_REMOVE}.key \
+                  /root/${DOMAIN_TO_REMOVE}.crt \
+                  /root/renew_cert.sh
+            rm -rf ~/.acme.sh/${DOMAIN_TO_REMOVE}
+
+            echo "✅ 已彻底移除 ${DOMAIN_TO_REMOVE} 的所有证书相关文件。"
             continue
             ;;
         3)
-            echo "已退出。"
+            echo "👋 已退出。"
             exit 0
             ;;
         *)
-            echo "无效选项，请重新输入。"
+            echo "❌ 无效选项，请重新输入。"
             continue
             ;;
     esac
@@ -54,7 +64,7 @@ read -p "请输入电子邮件地址: " EMAIL
 
 # 若已存在证书文件，提醒用户
 if [ -f "/root/${DOMAIN}.key" ] || [ -f "/root/${DOMAIN}.crt" ]; then
-    echo "检测到已存在的证书文件：/root/${DOMAIN}.key 或 /root/${DOMAIN}.crt"
+    echo "⚠️ 检测到已存在的证书文件：/root/${DOMAIN}.key 或 /root/${DOMAIN}.crt"
     echo "如需重新申请，请先选择菜单中的“移除证书文件”操作。"
     exit 1
 fi
@@ -124,11 +134,12 @@ chmod +x "$HOME/.acme.sh/acme.sh"
 # 注册账户
 acme.sh --register-account -m $EMAIL --server $CA_SERVER
 
-# 申请证书
+# 申请证书（无需 --force，因为清理已完成）
 if ! ~/.acme.sh/acme.sh --issue --standalone -d $DOMAIN --server $CA_SERVER; then
-    echo "证书申请失败，清理文件。"
+    echo "❌ 证书申请失败，清理文件。"
     rm -f /root/${DOMAIN}.key /root/${DOMAIN}.crt
     ~/.acme.sh/acme.sh --remove -d $DOMAIN
+    rm -rf ~/.acme.sh/${DOMAIN}
     exit 1
 fi
 
@@ -138,7 +149,7 @@ fi
     --fullchain-file /root/${DOMAIN}.crt
 
 # 提示成功
-echo "SSL证书已生成："
+echo "✅ SSL证书已生成："
 echo "证书: /root/${DOMAIN}.crt"
 echo "私钥: /root/${DOMAIN}.key"
 
