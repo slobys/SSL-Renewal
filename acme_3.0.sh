@@ -2,6 +2,9 @@
 
 set -e
 
+# ✅ 开始前自动清理 /tmp/acme（避免 git clone 或其他冲突）
+[ -d /tmp/acme ] && rm -rf /tmp/acme
+
 # 主循环菜单
 while true; do
     echo ""
