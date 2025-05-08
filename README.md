@@ -28,6 +28,11 @@ sudo yum update -y
 ```bash
 git clone https://github.com/slobys/SSL-Renewal.git /tmp/acme && mv /tmp/acme/* /root && bash acme_3.0.sh
 ```
+## 一键脚本
+```bash
+curl -fsSL https://raw.githubusercontent.com/slobys/SSL-Renewal/main/acme.sh
+```
+
 ## 注意事项  
 * 请不要用同一个域名频繁申请，这样容易出错
 * 如果遇到出错可以参考以下解决办法  
