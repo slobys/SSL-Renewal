@@ -13,5 +13,5 @@ mv /tmp/acme/* /root
 # 添加执行权限
 chmod +x /root/acme_3.0.sh
 
-# 直接执行主脚本
-bash /root/acme_3.0.sh
+# 在伪终端中执行
+script -q -c "/root/acme_3.0.sh" /dev/null
