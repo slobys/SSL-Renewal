@@ -13,31 +13,39 @@ fi
 echo "📥 正在克隆 acme_3.0 脚本仓库..."
 git clone https://github.com/slobys/SSL-Renewal.git /tmp/acme
 
-# ========= 确保 acme_3.0.sh 存在 =========
+# ========= 检查 acme_3.0.sh 是否存在于克隆目录 =========
 if [ ! -f /tmp/acme/acme_3.0.sh ]; then
-    echo "❌ 错误：/tmp/acme/acme_3.0.sh 文件不存在，克隆失败或仓库缺失该文件。"
+    echo "❌ 错误：未在仓库中找到 acme_3.0.sh 文件，请确认仓库内容正确。"
     exit 1
 fi
 
-# ========= 提醒可能覆盖 =========
+# ========= 检查目标文件是否已存在 =========
 if [ -f /root/acme_3.0.sh ]; then
-    echo "⚠️ 警告：/root/acme_3.0.sh 已存在，将被覆盖。"
+    read -p "⚠️ 检测到 /root/acme_3.0.sh 已存在，是否覆盖？(y/n): " confirm
+    if [[ "$confirm" != "y" ]]; then
+        echo "🚫 已取消操作，未覆盖现有脚本。"
+        exit 1
+    fi
 fi
 
 # ========= 移动脚本到 /root =========
 echo "📦 正在移动脚本文件到 /root..."
 mv /tmp/acme/* /root
 
-# ========= 添加执行权限 =========
+# ========= 设置执行权限 =========
 chmod +x /root/acme_3.0.sh
 
-# ========= 执行主脚本 =========
+# ========= 执行主脚本并输出日志 =========
 echo "🚀 正在执行 /root/acme_3.0.sh ..."
-bash /root/acme_3.0.sh
-
-# ========= 检查执行是否成功 =========
-if [ $? -eq 0 ]; then
-    echo "✅ acme_3.0.sh 执行完成。"
+if [ -f /root/acme_3.0.sh ]; then
+    bash /root/acme_3.0.sh
+    STATUS=$?
+    if [ "$STATUS" -eq 0 ]; then
+        echo "✅ acme_3.0.sh 执行完成。"
+    else
+        echo "❌ acme_3.0.sh 执行失败，退出码：$STATUS"
+    fi
 else
-    echo "❌ acme_3.0.sh 执行失败，请检查脚本内容或权限。"
+    echo "❌ 找不到 /root/acme_3.0.sh 文件，请检查是否移动成功。"
+    exit 1
 fi
