@@ -30,7 +30,7 @@ git clone https://github.com/slobys/SSL-Renewal.git /tmp/acme && mv /tmp/acme/* 
 ```
 ## 一键脚本
 ```bash
-curl -fsSL https://raw.githubusercontent.com/slobys/SSL-Renewal/main/acme.sh
+bash <(curl -fsSL https://raw.githubusercontent.com/slobys/SSL-Renewal/main/acme.sh)
 ```
 
 ## 注意事项  
