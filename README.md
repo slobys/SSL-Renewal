@@ -26,10 +26,6 @@ sudo yum update -y
 ```
 ## 一键脚本
 ```bash
-git clone https://github.com/slobys/SSL-Renewal.git /tmp/acme && mv /tmp/acme/* /root && bash acme_3.0.sh
-```
-## 一键脚本
-```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/slobys/SSL-Renewal/main/acme.sh)
 ```
 
