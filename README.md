@@ -5,25 +5,6 @@
 * 选择SSL证书颁发机构（增加申请成功率）  
 * 证书自动续期  
 
-## 安装git
-### Debian和Ubuntu系统
-```bash
-sudo apt install git -y
-```
-### CentOS系统
-```
-sudo yum install git -y
-```
-
-### 如果执行后出错，请先更新系统
-* （Debian/Ubuntu系统）
-```bash
-sudo apt update -y
-```
-* （CentOS系统）
-```bash
-sudo yum update -y
-```
 ## 一键脚本
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/slobys/SSL-Renewal/main/acme.sh)
