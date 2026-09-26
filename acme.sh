@@ -21,7 +21,7 @@ fetch_script() {
 }
 
 if [ -f /etc/openwrt_release ]; then
-    echo '检测到 OpenWrt / iStoreOS：进入软路由本机模式，无需 Bash、Python、Git 或云服务器。'
+    echo '检测到 OpenWrt / iStoreOS：进入软路由本机模式，无需 Python、Git 或云服务器。'
     fetch_script https://raw.githubusercontent.com/slobys/SSL-Renewal/main/openwrt_ip_ssl.sh "$DOWNLOAD_DIR/openwrt_ip_ssl.sh"
     sh -n "$DOWNLOAD_DIR/openwrt_ip_ssl.sh"
     TARGET_DIR=/root/.ssl-renewal/openwrt

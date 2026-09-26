@@ -4,23 +4,17 @@
 
 ## 一键运行
 
-**服务器与 OpenWrt / iStoreOS 使用同一个命令：直接在目标设备的 SSH 终端以 root 执行。**
+**服务器与 OpenWrt / iStoreOS 保留同一条安装命令，在目标设备的 SSH 终端以 root 执行：**
 
-```sh
-sh -c '
-f=$(mktemp /tmp/ssl-renewal.XXXXXX) || exit 1
-trap "rm -f \"$f\"" EXIT
-if command -v curl >/dev/null 2>&1; then
-  curl -q -fsSL "$1" -o "$f"
-else
-  wget -O "$f" "$1"
-fi && test -s "$f" && sh -n "$f" && sh "$f"
-' sh https://raw.githubusercontent.com/slobys/SSL-Renewal/main/acme.sh
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/slobys/SSL-Renewal/main/acme.sh)
 ```
 
-自动识别系统：Linux 服务器进入服务器菜单；OpenWrt / iStoreOS 请直接在软路由运行，自动进入本机菜单，无需云服务器、Bash、Python 或 Git。
+系统识别与安装分流均在 `acme.sh` 内完成：Linux 服务器进入服务器菜单；OpenWrt / iStoreOS 请直接在软路由运行，自动进入本机菜单，无需云服务器代办。
 
-自动选择 `curl` 或支持 HTTPS 的 `wget`；下载失败不执行，不关闭 TLS 校验。再次运行可更新脚本，保留证书和配置；旧安装命令仍可用，已有远程任务不自动迁移或删除。
+**入口前置条件：**设备需已有 `bash`、`curl`。OpenWrt 缺少时先通过 `opkg` / `apk` 安装；当前 Shell 不支持 `<(...)` 时，先输入 `bash` 再执行。软路由管理主体仍使用 `ash`，不需要 Python 或 Git；尚未启动的脚本不能补装入口自身缺少的命令。
+
+再次执行可更新脚本，保留证书和配置；已有远程任务不自动迁移或删除。
 
 ## 主菜单
 

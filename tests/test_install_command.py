@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Test the exact universal command from README without network or host writes."""
+"""Test the user's original Bash entry, with offline downloads and isolated paths."""
 import os
 from pathlib import Path
 import re
@@ -11,7 +11,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 README = (ROOT / 'README.md').read_text()
-COMMAND = re.search(r'## 一键运行\n.*?```sh\n(.*?)\n```', README, re.S).group(1)
+COMMAND = re.search(r'## 一键运行\n.*?```bash\n(.*?)\n```', README, re.S).group(1)
 URL = 'https://raw.githubusercontent.com/slobys/SSL-Renewal/main/acme.sh'
 
 
@@ -22,9 +22,9 @@ class UniversalInstallCommandTests(unittest.TestCase):
         self.base = Path(self.tmp.name)
         self.bin = self.base / 'bin'
         self.bin.mkdir()
-        self.shell_path = shutil.which('sh')
+        self.shell_path = shutil.which('bash')
         self.python = shutil.which('python3')
-        for name in ('sh', 'mktemp', 'rm'):
+        for name in ('bash', 'sh', 'mktemp', 'rm'):
             (self.bin / name).symlink_to(shutil.which(name))
         self.payload = self.base / 'payload.sh'
         self.payload.write_text('''#!/bin/sh
@@ -37,95 +37,72 @@ exit "${INSTALL_EXIT:-0}"
                         TEMP_LOG=str(self.base / 'temp-path'),
                         TOOL_LOG=str(self.base / 'tool'), DOWNLOAD_EXIT='0')
 
-    def downloader(self, name):
-        target = self.bin / name
+    def downloader(self):
+        target = self.bin / 'curl'
         target.write_text('#!' + self.python + '\n' + '''import os, pathlib, sys
 args = sys.argv[1:]
-name = pathlib.Path(sys.argv[0]).name
-flag = '-o' if name == 'curl' else '-O'
-if name == 'curl':
-    assert args[0] == '-q' and '-fsSL' in args, args
-path = pathlib.Path(args[args.index(flag) + 1])
-assert 'https://raw.githubusercontent.com/slobys/SSL-Renewal/main/acme.sh' in args, args
-assert '--insecure' not in args and '--no-check-certificate' not in args, args
-pathlib.Path(os.environ['TEMP_LOG']).write_text(str(path))
-pathlib.Path(os.environ['TOOL_LOG']).write_text(name)
-path.write_bytes(pathlib.Path(os.environ['PAYLOAD']).read_bytes())
-sys.exit(int(os.environ['DOWNLOAD_EXIT']))
+assert '--insecure' not in args, args
+if args == ['-fsSL', 'https://raw.githubusercontent.com/slobys/SSL-Renewal/main/acme.sh']:
+    pathlib.Path(os.environ['TOOL_LOG']).write_text('curl')
+    sys.stdout.buffer.write(pathlib.Path(os.environ['PAYLOAD']).read_bytes())
+elif '-o' in args and any(u.endswith('/openwrt_ip_ssl.sh') for u in args):
+    pathlib.Path(args[args.index('-o') + 1]).write_text(
+        '#!/bin/sh\\nIFS= read -r choice\\nprintf "OPENWRT=%s\\\\n" "$choice"\\n')
+else:
+    raise AssertionError('Unexpected download: ' + repr(args))
 ''')
         target.chmod(0o700)
 
-    def run_command(self, input_text='2\n', expected=0, updates=None, interpreter=None):
-        result = subprocess.run((interpreter or [self.shell_path]) + ['-c', COMMAND],
+    def run_command(self, input_text='2\n', expected=0, updates=None):
+        result = subprocess.run([self.shell_path, '--noprofile', '--norc', '-c', COMMAND],
                                 input=input_text, text=True, capture_output=True,
                                 env=dict(self.env, **(updates or {})), timeout=10)
         self.assertEqual(expected, result.returncode, result.stdout + result.stderr)
-        if (self.base / 'temp-path').exists():
-            self.assertFalse(Path((self.base / 'temp-path').read_text()).exists())
         return result
 
-    def test_readme_has_one_portable_install_command(self):
+    def test_readme_preserves_exact_original_command(self):
         section = README.split('## 一键运行', 1)[1].split('## 主菜单', 1)[0]
-        self.assertEqual(1, section.count('```sh'))
-        self.assertEqual(1, COMMAND.count(URL))
-        self.assertNotIn('<(', COMMAND)
-        self.assertNotIn('| sh', COMMAND)
+        self.assertEqual('bash <(curl -fsSL ' + URL + ')', COMMAND)
+        self.assertEqual(1, section.count('```bash'))
+        self.assertNotIn("sh -c '", section)
         self.assertLessEqual(len(README.splitlines()), 80)
         subprocess.run([self.shell_path, '-n', '-c', COMMAND], check=True)
 
-    def test_curl_only_preserves_menu_input_and_cleans_temp(self):
-        self.downloader('curl')
+    def test_readme_states_entry_requirements(self):
+        section = README.split('## 一键运行', 1)[1].split('## 主菜单', 1)[0]
+        for text in ('`bash`', '`curl`', '当前 Shell', '直接在软路由', '`acme.sh` 内'):
+            self.assertIn(text, section)
+        self.assertNotIn('无需云服务器、Bash', section)
+        self.assertNotIn('下载失败不执行', section)
+
+    def test_original_command_preserves_interactive_input(self):
+        self.downloader()
         result = self.run_command()
         self.assertIn('CHOICE=2', result.stdout)
         self.assertEqual('curl', (self.base / 'tool').read_text())
 
-    def test_wget_only_preserves_menu_input_and_cleans_temp(self):
-        self.downloader('wget')
-        self.assertIn('CHOICE=2', self.run_command().stdout)
-        self.assertEqual('wget', (self.base / 'tool').read_text())
-
-    def test_curl_preferred_when_both_installed(self):
-        self.downloader('curl')
-        self.downloader('wget')
-        self.run_command()
-        self.assertEqual('curl', (self.base / 'tool').read_text())
-
-    def test_download_failure_never_executes_partial_file(self):
-        for name in ('curl', 'wget'):
-            with self.subTest(name=name):
-                self.downloader(name)
-                result = self.run_command(expected=23, updates={'DOWNLOAD_EXIT': '23'})
-                self.assertNotIn('READY', result.stdout)
-                (self.bin / name).unlink()
-
-    def test_empty_download_rejected(self):
-        self.downloader('curl')
-        self.payload.write_text('')
-        self.run_command(expected=1)
-
-    def test_syntax_error_does_not_run_earlier_valid_commands(self):
-        self.downloader('wget')
-        self.payload.write_text('echo SHOULD_NOT_RUN\nif then\n')
-        result = self.run_command(expected=2)
-        self.assertNotIn('SHOULD_NOT_RUN', result.stdout)
-
     def test_installer_error_propagates(self):
-        self.downloader('curl')
+        self.downloader()
         self.assertIn('READY', self.run_command(expected=17, updates={'INSTALL_EXIT': '17'}).stdout)
 
-    def test_no_downloader_does_not_run_installer(self):
+    def test_missing_bash_cannot_bootstrap_itself(self):
+        self.downloader()
+        (self.bin / 'bash').unlink()
         self.assertNotIn('READY', self.run_command(expected=127).stdout)
 
-    def test_ash_and_bash_can_run_the_same_command(self):
-        self.downloader('wget')
-        interpreters = []
-        if shutil.which('busybox'):
-            interpreters.append([shutil.which('busybox'), 'ash'])
-        if shutil.which('bash'):
-            interpreters.append([shutil.which('bash'), '--noprofile', '--norc'])
-        for interpreter in interpreters:
-            with self.subTest(interpreter=interpreter):
-                self.assertIn('CHOICE=2', self.run_command(interpreter=interpreter).stdout)
+    def test_missing_curl_does_not_start_the_downloaded_script(self):
+        # Process substitution's curl status is not Bash's exit status. Do not
+        # claim the old command has the discarded wrapper's download guarantees.
+        result = self.run_command()
+        self.assertIn('curl', result.stderr)
+        self.assertNotIn('READY', result.stdout)
+
+    def test_shell_without_process_substitution_needs_bash_first(self):
+        dash = shutil.which('dash')
+        if not dash:
+            self.skipTest('dash not installed')
+        result = subprocess.run([dash, '-n', '-c', COMMAND], capture_output=True)
+        self.assertNotEqual(0, result.returncode)
 
     def bootstrap_fixture(self, openwrt):
         # Rewrite only absolute host paths in the real entry, never run it on
@@ -145,29 +122,22 @@ sys.exit(int(os.environ['DOWNLOAD_EXIT']))
         (self.bin / 'id').chmod(0o700)
         return home
 
-    def test_real_bootstrap_openwrt_route_without_bash_or_git(self):
+    def test_original_command_routes_to_openwrt_without_git_or_python(self):
         home = self.bootstrap_fixture(True)
-        self.downloader('wget')
-        downloader = self.bin / 'wget'
-        original = downloader.read_text()
-        native = '#!/bin/sh\nIFS= read -r choice\nprintf "OPENWRT=%s\\n" "$choice"\n'
-        extra = ("\nif any(u.endswith('/openwrt_ip_ssl.sh') for u in args):\n"
-                 "    out = pathlib.Path(args[args.index('-O') + 1])\n"
-                 "    out.write_text(" + repr(native) + ")\n    sys.exit(0)\n")
-        original = original.replace("flag = '-o' if name == 'curl' else '-O'\n",
-                                    "flag = '-o' if name == 'curl' else '-O'\n" + extra)
-        downloader.write_text(original)
+        self.downloader()
+        for name in ('git', 'python3', 'apt-get', 'yum', 'dnf'):
+            path = self.bin / name
+            path.write_text('#!/bin/sh\necho UNEXPECTED_SERVER_DEPENDENCY >&2\nexit 99\n')
+            path.chmod(0o700)
         result = self.run_command(input_text='1\n')
         self.assertIn('OPENWRT=1', result.stdout)
+        self.assertNotIn('UNEXPECTED_SERVER_DEPENDENCY', result.stdout + result.stderr)
         self.assertTrue((home / '.ssl-renewal/openwrt/openwrt_ip_ssl.sh').exists())
         self.assertFalse((home / 'acme_3.0.sh').exists())
 
     def test_real_bootstrap_linux_route(self):
         home = self.bootstrap_fixture(False)
-        self.downloader('curl')
-        bash = self.bin / 'bash'
-        bash.write_text('#!/bin/sh\nif [ "$1" = -n ]; then exec sh "$@"; fi\nexec sh "$@"\n')
-        bash.chmod(0o700)
+        self.downloader()
         git = self.bin / 'git'
         git.write_text('#!' + self.python + '\n' + '''import pathlib, sys
 args = sys.argv[1:]
