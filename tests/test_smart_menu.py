@@ -317,7 +317,7 @@ main
         self.assertIn('已取消', result.stdout)
         self.assertFalse((self.base / 'acme.log').exists())
 
-    def navigation(self, body='', input_text=''):
+    def navigation(self, body='', input_text='', entrypoint='main'):
         return self.shell('''
 require_root() { :; }
 sleep() { :; }
@@ -325,7 +325,13 @@ DYNAMIC_DIR="$TEST_DIR/dynamic"
 DYNAMIC_RUNNER="$DYNAMIC_DIR/dynamic_ip_cert.sh"
 REMOTE_DIR="$TEST_DIR/remote"
 REMOTE_RUNNER="$REMOTE_DIR/remote_ip_ssl.sh"
-''' + body + '\nmain', input_text)
+''' + body + '\n' + entrypoint, input_text)
+
+    def legacy_dynamic_navigation(self, body='', input_text=''):
+        # Retain direct regression coverage of dormant helpers without adding
+        # their retired entry back into the real server main menu.
+        return self.navigation(body, input_text,
+                               entrypoint='manage_dynamic_ip; echo 已退出')
 
     def dynamic_fixture(self, families=(4,)):
         directory = self.base / 'dynamic'
@@ -345,28 +351,33 @@ CHALLENGE_MODE=webroot
         return directory
 
     def test_main_exit_and_eof_do_not_deploy(self):
-        for text in ('6\n', ''):
+        for text in ('5\n', ''):
             with self.subTest(text=text):
                 result = self.navigation(input_text=text)
-                self.assertIn('4）OpenWrt 本机模式（软路由动态 IP / 自动续期）', result.stdout)
-                self.assertNotIn('4）本机动态 IP SSL 管理', result.stdout)
+                self.assertIn('3）OpenWrt 本机模式（软路由动态 IP / 自动续期）', result.stdout)
+                self.assertIn('4）更新 / 重新部署脚本', result.stdout)
+                self.assertIn('5）退出', result.stdout)
+                self.assertIn('6）卸载服务器端', result.stdout)
+                self.assertNotIn('本机动态 IP 证书（开通 / 管理）', result.stdout)
+                self.assertNotIn('7）', result.stdout)
                 self.assertFalse((self.base / 'curl.log').exists())
 
     def test_dynamic_submenu_returns_without_falling_into_issuance(self):
-        result = self.navigation(input_text='3\n0\n6\n')
+        result = self.legacy_dynamic_navigation(input_text='0\n')
         self.assertIn('1）开通 / 重新配置', result.stdout)
         self.assertIn('IPv4：未配置；IPv6：未配置', result.stdout)
-        self.assertEqual(2, result.stdout.count('SSL证书管理菜单'))
+        self.assertEqual(1, result.stdout.count('本机动态 IP 证书'))
+        self.assertIn('已退出', result.stdout)
         self.assertFalse((self.base / 'curl.log').exists())
 
     def test_dynamic_navigation_handles_invalid_input_and_eof(self):
-        for text in ('3\n', '3\nwrong\n0\n6\n', 'wrong\n6\n'):
+        for text in ('', 'wrong\n0\n', 'wrong\n'):
             with self.subTest(text=text):
-                self.navigation(input_text=text)
+                self.legacy_dynamic_navigation(input_text=text)
         self.assertFalse((self.base / 'curl.log').exists())
 
     def test_empty_dynamic_status_does_not_require_issuance(self):
-        result = self.navigation(input_text='3\n2\n\n0\n6\n')
+        result = self.legacy_dynamic_navigation(input_text='2\n\n0\n')
         self.assertIn('IPv4: 未配置', result.stdout)
         self.assertIn('IPv6: 未配置', result.stdout)
         self.assertFalse((self.base / 'acme.log').exists())
@@ -374,7 +385,7 @@ CHALLENGE_MODE=webroot
     def test_empty_dynamic_check_and_disable_return_to_menu(self):
         for action in ('3', '4'):
             with self.subTest(action=action):
-                result = self.navigation(input_text='3\n' + action + '\n\n0\n6\n')
+                result = self.legacy_dynamic_navigation(input_text=action + '\n\n0\n')
                 self.assertIn('尚未开通本机动态 IP 证书', result.stdout)
                 self.assertIn('已退出', result.stdout)
         self.assertFalse((self.base / 'acme.log').exists())
@@ -391,7 +402,7 @@ CHALLENGE_MODE=webroot
         directory = self.dynamic_fixture()
         config = directory / 'dynamic-ip-v4.conf'
         old = config.read_bytes()
-        result = self.navigation(input_text='3\n1\n1\n\n\n0\n6\n')
+        result = self.legacy_dynamic_navigation(input_text='1\n1\n\n\n0\n')
         self.assertIn('保留原配置', result.stdout)
         self.assertEqual(old, config.read_bytes())
         self.assertFalse((self.base / 'curl.log').exists())
@@ -410,7 +421,7 @@ install_dynamic_runner() {
 }
 install_dynamic_cron() { echo "DYNAMIC_CRON=$2"; }
 '''
-        result = self.navigation(body, '3\n1\n1\ntest@example.com\n1\n\n3\n\n0\n6\n')
+        result = self.legacy_dynamic_navigation(body, '1\n1\ntest@example.com\n1\n\n3\n\n0\n')
         self.assertIn('DYNAMIC_CRON=4', result.stdout)
         self.assertIn('IPv4：已配置；IPv6：未配置', result.stdout)
         self.assertIn('已退出', result.stdout)
@@ -425,15 +436,15 @@ setup_dynamic_ip_certificate() {
     echo INVALID_SUCCESS
 }
 '''
-        result = self.navigation(body, '3\n1\n\n0\n6\n')
+        result = self.legacy_dynamic_navigation(body, '1\n\n0\n')
         self.assertIn('ACTION_STARTED', result.stdout)
         self.assertNotIn('INVALID_SUCCESS', result.stdout)
         self.assertIn('退出码 1', result.stdout)
         self.assertIn('已退出', result.stdout)
 
     def test_explicit_exit_is_isolated_from_navigation(self):
-        result = self.navigation('setup_dynamic_ip_certificate() { exit 23; }',
-                                 '3\n1\n\n0\n6\n')
+        result = self.legacy_dynamic_navigation('setup_dynamic_ip_certificate() { exit 23; }',
+                                                '1\n\n0\n')
         self.assertIn('退出码 23', result.stdout)
         self.assertIn('已退出', result.stdout)
 
@@ -452,7 +463,7 @@ setup_dynamic_ip_certificate() {
     def test_dynamic_check_reuses_existing_runner_and_config(self):
         directory = self.dynamic_fixture((4, 6))
         before = {p.name: p.read_bytes() for p in directory.iterdir()}
-        result = self.navigation(input_text='3\n3\n2\n\n0\n6\n')
+        result = self.legacy_dynamic_navigation(input_text='3\n2\n\n0\n')
         self.assertIn('CHECKED=' + str(directory / 'dynamic-ip-v6.conf'), result.stdout)
         self.assertEqual(before, {p.name: p.read_bytes() for p in directory.iterdir()})
         self.assertFalse((self.base / 'acme.log').exists())
@@ -460,14 +471,14 @@ setup_dynamic_ip_certificate() {
     def test_failed_dynamic_check_allows_more_actions(self):
         directory = self.dynamic_fixture()
         (directory / 'dynamic_ip_cert.sh').write_text('#!/bin/bash\nexit 17\n')
-        result = self.navigation(input_text='3\n3\n1\n\n0\n6\n')
+        result = self.legacy_dynamic_navigation(input_text='3\n1\n\n0\n')
         self.assertIn('退出码 17', result.stdout)
         self.assertIn('已退出', result.stdout)
 
     def test_dynamic_disable_cancel_preserves_everything(self):
         directory = self.dynamic_fixture()
         before = {p.name: p.read_bytes() for p in directory.iterdir()}
-        result = self.navigation(input_text='3\n4\n1\nno\n\n0\n6\n')
+        result = self.legacy_dynamic_navigation(input_text='4\n1\nno\n\n0\n')
         self.assertIn('已取消，原配置和任务保持不变', result.stdout)
         self.assertEqual(before, {p.name: p.read_bytes() for p in directory.iterdir()})
 
@@ -490,7 +501,7 @@ case "$1" in
     *) exit 99 ;;
 esac
 ''')
-        result = self.navigation(input_text='3\n4\n1\nSTOP\n\n0\n6\n')
+        result = self.legacy_dynamic_navigation(input_text='4\n1\nSTOP\n\n0\n')
         self.assertIn('只移除 IP 变化检测', result.stdout)
         self.assertEqual(v6 + other, cron.read_text())
         self.assertFalse((directory / 'dynamic-ip-v4.conf').exists())
@@ -500,13 +511,13 @@ esac
         self.assertEqual('private-key', (self.base / 'kept.key').read_text())
         self.assertEqual('remote-device', (remote / 'device.conf').read_text())
 
-    def test_new_remote_entry_is_independent_of_local_dynamic_setup(self):
+    def test_openwrt_entry_is_independent_of_retired_server_dynamic_setup(self):
         body = '''
 setup_dynamic_ip_certificate() { echo WRONG_LOCAL_SETUP; exit 90; }
 manage_dynamic_ip() { echo WRONG_LOCAL_MENU; exit 91; }
 manage_openwrt_local() { CERT_KIND=ip; echo OPENWRT_ONLY; }
 '''
-        result = self.navigation(body, '4\n6\n')
+        result = self.navigation(body, '3\n5\n')
         self.assertIn('OPENWRT_ONLY', result.stdout)
         self.assertNotIn('WRONG_LOCAL', result.stdout)
         self.assertFalse((self.base / 'dynamic').exists())
@@ -514,7 +525,7 @@ manage_openwrt_local() { CERT_KIND=ip; echo OPENWRT_ONLY; }
         self.assertEqual(2, result.stdout.count('SSL证书管理菜单'))
 
     def test_remote_action_error_returns_to_main(self):
-        result = self.navigation('manage_openwrt_local() { exit 27; }', '4\n\n6\n')
+        result = self.navigation('manage_openwrt_local() { exit 27; }', '3\n\n5\n')
         self.assertIn('退出码 27', result.stdout)
         self.assertIn('已退出', result.stdout)
 
@@ -534,7 +545,7 @@ manage_openwrt_local() { CERT_KIND=ip; echo OPENWRT_ONLY; }
 
     def test_update_default_cancel_and_error(self):
         result = self.navigation('update_script() { echo UPDATE_STARTED; exit 21; }',
-                                 '5\n\n5\ny\n\n6\n')
+                                 '4\n\n4\ny\n\n5\n')
         self.assertEqual(1, result.stdout.count('UPDATE_STARTED'))
         self.assertIn('已取消更新', result.stdout)
         self.assertIn('退出码 21', result.stdout)
@@ -542,40 +553,79 @@ manage_openwrt_local() { CERT_KIND=ip; echo OPENWRT_ONLY; }
         self.assertFalse((self.base / 'curl.log').exists())
 
     def test_successful_update_returns_without_reentering_old_menu(self):
-        result = self.navigation('update_script() { echo UPDATED; }', '5\ny\n')
+        result = self.navigation('update_script() { echo UPDATED; }', '4\ny\n')
         self.assertIn('UPDATED', result.stdout)
         self.assertEqual(1, result.stdout.count('SSL证书管理菜单'))
 
     def test_manual_ip_hint_uses_new_remote_entry(self):
         result = self.shell('select_public_ip', '3\n' + V4 + '\n')
-        self.assertIn('直接在 OpenWrt 上运行主菜单 4 对应的本机模式', result.stdout)
+        self.assertIn('直接在 OpenWrt 上运行主菜单 3 对应的本机模式', result.stdout)
         self.assertNotIn('主菜单 5 的远程模式', result.stdout)
 
     def test_readme_matches_menu_and_stays_concise(self):
         text = (ROOT / 'README.md').read_text()
-        self.assertIn('| 3）本机动态 IP 证书 |', text)
-        self.assertIn('| 4）OpenWrt 本机模式 |', text)
+        self.assertNotIn('| 3）本机动态 IP 证书 |', text)
+        self.assertIn('| 3）OpenWrt 本机模式 |', text)
+        self.assertIn('| 4）更新 / 重新部署脚本 |', text)
+        self.assertIn('| 5）退出 |', text)
+        self.assertIn('| 6）卸载服务器端 |', text)
+        self.assertIn('服务器选主菜单 6；软路由选本机菜单 5', text)
+        self.assertNotIn('Linux 第 3 项', text)
         self.assertIn('直接在软路由', text)
         self.assertNotIn('| 4）本机动态 IP 管理 |', text)
         self.assertLessEqual(len(text.splitlines()), 80)
 
     def test_server_uninstall_cancel_returns_to_menu(self):
-        result = self.navigation('uninstall_server_menu() { echo CANCELLED; return 2; }', '7\n6\n')
-        self.assertIn('7）卸载服务器端', result.stdout)
+        result = self.navigation('uninstall_server_menu() { echo CANCELLED; return 2; }', '6\n5\n')
+        self.assertIn('6）卸载服务器端', result.stdout)
         self.assertIn('CANCELLED', result.stdout)
         self.assertIn('已退出', result.stdout)
         self.assertEqual(2, result.stdout.count('SSL证书管理菜单'))
 
     def test_server_uninstall_success_exits_old_menu(self):
-        result = self.navigation('uninstall_server_menu() { echo UNINSTALLED; return 0; }', '7\n')
+        result = self.navigation('uninstall_server_menu() { echo UNINSTALLED; return 0; }', '6\n')
         self.assertIn('UNINSTALLED', result.stdout)
         self.assertEqual(1, result.stdout.count('SSL证书管理菜单'))
         self.assertFalse((self.base / 'acme.log').exists())
 
     def test_server_uninstall_error_does_not_exit_navigation(self):
-        result = self.navigation('uninstall_server_menu() { echo UNINSTALL_ERROR; return 1; }', '7\n\n6\n')
+        result = self.navigation('uninstall_server_menu() { echo UNINSTALL_ERROR; return 1; }', '6\n\n5\n')
         self.assertIn('UNINSTALL_ERROR', result.stdout)
         self.assertIn('已退出', result.stdout)
+
+    def test_removed_dynamic_entry_preserves_existing_data_and_jobs(self):
+        directory = self.dynamic_fixture((4, 6))
+        before = {p.name: p.read_bytes() for p in directory.iterdir()}
+        cron = self.base / 'crontab'
+        jobs = '*/5 * * * * /root/.ssl-renewal/dynamic_ip_cert.sh old.conf\n'
+        cron.write_text(jobs)
+        (self.base / 'kept.crt').write_text('certificate')
+        (self.base / 'kept.key').write_text('private-key')
+        body = '''
+manage_dynamic_ip() { echo WRONG_DYNAMIC_MENU; exit 91; }
+setup_dynamic_ip_certificate() { echo WRONG_DYNAMIC_SETUP; exit 92; }
+manage_openwrt_local() { echo OPENWRT_ONLY; }
+'''
+        result = self.navigation(body, '3\n5\n')
+        self.assertIn('OPENWRT_ONLY', result.stdout)
+        self.assertNotIn('WRONG_DYNAMIC', result.stdout)
+        self.assertEqual(before, {p.name: p.read_bytes() for p in directory.iterdir()})
+        self.assertEqual(jobs, cron.read_text())
+        self.assertEqual('certificate', (self.base / 'kept.crt').read_text())
+        self.assertEqual('private-key', (self.base / 'kept.key').read_text())
+        self.assertFalse((self.base / 'curl.log').exists())
+
+    def test_former_seventh_option_is_invalid_not_uninstall(self):
+        result = self.navigation('uninstall_server_menu() { echo MUST_NOT_UNINSTALL; exit 93; }',
+                                 '7\n5\n')
+        self.assertIn('无效选项', result.stdout)
+        self.assertIn('已退出', result.stdout)
+        self.assertNotIn('MUST_NOT_UNINSTALL', result.stdout)
+
+    def test_fixed_request_does_not_recommend_removed_dynamic_entry(self):
+        result = self.shell('confirm_ip_request', '\n')
+        self.assertIn('服务器动态 IP 入口暂不提供', result.stdout)
+        self.assertNotIn('需要追踪请选择主菜单 3', result.stdout)
 
     def test_already_uninstalled_menu_does_not_issue_cert(self):
         directory=self.base / 'dynamic'; directory.mkdir()

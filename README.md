@@ -22,11 +22,12 @@ bash <(curl -fsSL https://raw.githubusercontent.com/slobys/SSL-Renewal/main/acme
 | --- | --- |
 | 1）域名证书 | Linux 本机申请 |
 | 2）本机固定 IP 证书 | 云服务器常用；自动识别 / 手动输入 |
-| 3）本机动态 IP 证书 | Linux 环境的开通与管理 |
-| 4）OpenWrt 本机模式 | **软路由自己申请、保存和续期**；必须在软路由运行 |
-| 5）更新 / 重新部署脚本 | 保留证书和配置 |
-| 6）退出 | 结束运行 |
-| 7）卸载服务器端 | 保留证书卸载，或备份后清理本项目配置 |
+| 3）OpenWrt 本机模式 | **软路由自己申请、保存和续期**；必须在软路由运行 |
+| 4）更新 / 重新部署脚本 | 保留证书和配置 |
+| 5）退出 | 结束运行 |
+| 6）卸载服务器端 | 保留证书卸载，或备份后清理本项目配置 |
+
+服务器本机动态 IP 入口暂时移除，已有证书、配置和自动任务保留；**OpenWrt 动态 IP 功能不受影响**。
 
 ## OpenWrt 怎么用
 
@@ -38,14 +39,14 @@ bash <(curl -fsSL https://raw.githubusercontent.com/slobys/SSL-Renewal/main/acme
 
 每 5 分钟检查：**IP 变化就重签；IP 未变但证书剩余不足 3 天也会续签。** 校验信任链、IP 和私钥后才部署；失败退避重试，保留旧证书。无需额外 LuCI 插件，依赖通过 `opkg/apk` 安装。
 
-管理菜单提供状态、立即检查、停用 / 恢复。**OpenWrt 停用会同时停止重签和续签**，保留文件但证书会自然过期；这与 Linux 第 3 项仅停用 IP 变化检测不同。
+管理菜单提供状态、立即检查、停用 / 恢复。**OpenWrt 停用会同时停止重签和续签**，保留文件但证书会自然过期。
 
 ## 证书与日志
 
 | 模式 | 路径 |
 | --- | --- |
 | Linux 域名 / 固定 IP | `/root/<域名或IP>.crt`、`.key`（IPv6 冒号换成下划线） |
-| Linux 动态 IP | `/root/dynamic-ip-v4.crt`、`.key`；IPv6 用 `v6` |
+| 旧版 Linux 动态 IP（保留） | `/root/dynamic-ip-v4.crt`、`.key`；IPv6 用 `v6` |
 | OpenWrt IPv4 | `/etc/ssl-renewal/openwrt/certs/v4/current/fullchain.pem`、`privkey.pem` |
 | OpenWrt IPv6 | 上述路径中的 `v4` 改为 `v6` |
 
@@ -53,7 +54,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/slobys/SSL-Renewal/main/acme
 
 ## 卸载 / 重装
 
-**服务器选主菜单 7；软路由选本机菜单 5。** 回车默认保留证书与配置，输入 `UNINSTALL` 才执行；清理模式需输入 `PURGE`，两种方式都会先备份到 `/root/ssl-renewal-backups/`。
+**服务器选主菜单 6；软路由选本机菜单 5。** 回车默认保留证书与配置，输入 `UNINSTALL` 才执行；清理模式需输入 `PURGE`，两种方式都会先备份到 `/root/ssl-renewal-backups/`。
 
 服务器卸载只移除本项目脚本、动态/旧远程任务；清理模式再删除对应配置和日志。**服务器证书、共享 `~/.acme.sh` 及其续期任务保留**，不会猜测删除旧版证书，也不连接远端设备。
 

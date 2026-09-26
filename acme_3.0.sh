@@ -196,7 +196,7 @@ select_public_ip() {
             echo "✅ 已选择 IPv${IP_VERSION}：$IDENTIFIER（$IP_SELECTION_MODE）"
             if [ "$IP_SELECTION_MODE" = "手动输入" ]; then
                 echo "ℹ️ 手动填写不会转移验证地点；目标 IP 的验证请求必须能到达本机。"
-                echo "   软路由证书请直接在 OpenWrt 上运行主菜单 4 对应的本机模式。"
+                echo "   软路由证书请直接在 OpenWrt 上运行主菜单 3 对应的本机模式。"
             fi
             return 0
         else
@@ -418,7 +418,7 @@ confirm_ip_request() {
     echo "目标：$IDENTIFIER（IPv$IP_VERSION，$IP_SELECTION_MODE）"
     echo "验证：$CHALLENGE_MODE，公网 TCP $VALIDATION_PORT"
     [ "$CHALLENGE_MODE" != "webroot" ] || echo "网站目录：$WEBROOT_PATH"
-    echo "固定 IP 模式不会自动追踪 IP 变化；需要追踪请选择主菜单 3。"
+    echo "固定 IP 模式不会自动追踪 IP 变化；服务器动态 IP 入口暂不提供。"
     read -r -p "继续申请？[Y/n]： " answer || return 1
     case "$answer" in
         ""|y|Y|yes|YES) return 0 ;;
@@ -876,7 +876,7 @@ update_script() (
 
 manage_openwrt_local() {
     if [ ! -f /etc/openwrt_release ]; then
-        echo "第 4 项需要直接在 OpenWrt 软路由上运行，不再由云服务器代办。"
+        echo "第 3 项需要直接在 OpenWrt 软路由上运行，不再由云服务器代办。"
         echo "请在软路由 SSH 终端执行："
         echo "wget -O /tmp/ssl-renewal-install.sh https://raw.githubusercontent.com/slobys/SSL-Renewal/main/acme.sh && sh /tmp/ssl-renewal-install.sh"
         echo "不会安装远程组件、连接其他设备或修改本机网络。"
@@ -921,14 +921,13 @@ while true; do
     echo "============== SSL证书管理菜单 =============="
     echo "1）域名证书（本机申请）"
     echo "2）本机固定 IP 证书（云服务器常用）"
-    echo "3）本机动态 IP 证书（开通 / 管理）"
-    echo "4）OpenWrt 本机模式（软路由动态 IP / 自动续期）"
-    echo "5）更新 / 重新部署脚本"
-    echo "6）退出"
-    echo "7）卸载服务器端（保留证书 / 清理配置）"
+    echo "3）OpenWrt 本机模式（软路由动态 IP / 自动续期）"
+    echo "4）更新 / 重新部署脚本"
+    echo "5）退出"
+    echo "6）卸载服务器端（保留证书 / 清理配置）"
     echo "============================================"
     echo "提示：云服务器自己用选 2；软路由请在 OpenWrt 上运行本机模式。"
-    read -r -p "请输入选项（1-7）： " MAIN_OPTION || return 0
+    read -r -p "请输入选项（1-6）： " MAIN_OPTION || return 0
 
     case "$MAIN_OPTION" in
         1)
@@ -939,14 +938,13 @@ while true; do
             CERT_KIND="ip"
             break
             ;;
+        # Keep the legacy dynamic helpers and installed jobs intact; only the
+        # server-menu entry is retired until explicitly requested again.
         3)
-            manage_dynamic_ip
-            ;;
-        4)
             run_menu_action manage_openwrt_local
             if [ "$MENU_ACTION_STATUS" -ne 0 ]; then pause_menu || return 0; fi
             ;;
-        5)
+        4)
             echo "只更新运行脚本，保留现有证书、设备配置和自动任务。"
             read -r -p "更新并打开新版菜单？[y/N]： " update_confirm || return 0
             case "$update_confirm" in
@@ -958,7 +956,7 @@ while true; do
                 *) echo "已取消更新。" ;;
             esac
             ;;
-        7)
+        6)
             uninstall_rc=0
             uninstall_server_menu || uninstall_rc=$?
             case "$uninstall_rc" in
@@ -967,7 +965,7 @@ while true; do
                 *) pause_menu || return 0 ;;
             esac
             ;;
-        6)
+        5)
             echo "👋 已退出。"
             return 0
             ;;

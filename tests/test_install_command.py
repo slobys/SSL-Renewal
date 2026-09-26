@@ -148,8 +148,8 @@ for name in ('acme.sh', 'acme_3.0.sh', 'dynamic_ip_cert.sh', 'remote_ip_ssl.sh',
 (repo / 'uninstall_server.py').write_text('# placeholder for offline installation test\\n')
 ''')
         git.chmod(0o700)
-        result = self.run_command(input_text='6\n')
-        self.assertIn('LINUX=6', result.stdout)
+        result = self.run_command(input_text='5\n')
+        self.assertIn('LINUX=5', result.stdout)
         self.assertTrue((home / 'acme_3.0.sh').exists())
         self.assertFalse((home / '.ssl-renewal/openwrt').exists())
 
