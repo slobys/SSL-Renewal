@@ -23,12 +23,29 @@ ow_require() {
     [ "$(id -u)" = 0 ] || ow_die '请用 root 运行。'
     [ -f /etc/openwrt_release ] || ow_die '此模式必须在 OpenWrt / iStoreOS 本机运行，不会连接远程设备。'
 }
+# Runs before dependency installation. Minimal OpenWrt may omit the stat applet;
+# BusyBox ls -ldn provides a numeric owner without adding a package dependency.
+# Read metadata for the directory itself, not its contents or a symlink target.
+ow_dir_owner_uid() (
+    [ -d "$1" ] && [ ! -L "$1" ] || exit 1
+    details=$(LC_ALL=C ls -ldn -- "$1" 2>/dev/null) || exit 1
+    printf '%s\n' "$details" | awk '
+        NR == 1 && $1 ~ /^d/ && $3 ~ /^[0-9]+$/ {print $3; valid=1; exit}
+        END {if (!valid) exit 1}'
+)
 ow_dirs() {
     umask 077
     [ ! -L "$OW_BASE" ] && [ ! -L "$OW_RUN" ] || ow_die '管理目录不能是符号链接。'
-    mkdir -p "$OW_BASE" "$OW_RUN"
-    [ "$(stat -c %u "$OW_BASE")" = "$(id -u)" ] && [ "$(stat -c %u "$OW_RUN")" = "$(id -u)" ] || ow_die '管理目录所有者不正确。'
-    chmod 700 "$OW_BASE" "$OW_RUN"
+    mkdir -p "$OW_BASE" "$OW_RUN" || ow_die '无法创建管理目录，请检查存储空间和写入权限。'
+    ow_current_uid=$(id -u) || ow_die '无法读取当前用户 UID。'
+    case "$ow_current_uid" in ''|*[!0-9]*) ow_die '无法读取当前用户 UID。';; esac
+    for ow_directory in "$OW_BASE" "$OW_RUN"; do
+        ow_directory_uid=$(ow_dir_owner_uid "$ow_directory") ||
+            ow_die "无法读取管理目录所有者（请检查 ls -ldn 是否可用）：$ow_directory"
+        [ "$ow_directory_uid" = "$ow_current_uid" ] ||
+            ow_die "管理目录所有者不正确：$ow_directory"
+    done
+    chmod 700 "$OW_BASE" "$OW_RUN" || ow_die '无法设置管理目录权限。'
 }
 ow_family() { case "$1" in 4|6) ;; *) ow_die '地址类型只能是 4 或 6。';; esac; }
 ow_paths() {
