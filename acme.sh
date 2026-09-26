@@ -41,4 +41,6 @@ rm -rf /tmp/acme
 git clone https://github.com/slobys/SSL-Renewal.git /tmp/acme
 mv /tmp/acme/* /root
 chmod +x /root/acme_3.0.sh
+[ -f /root/dynamic_ip_cert.sh ] && chmod +x /root/dynamic_ip_cert.sh
+[ -f /root/remote_ip_ssl.sh ] && chmod +x /root/remote_ip_ssl.sh
 script -q -c "/root/acme_3.0.sh" /dev/null
