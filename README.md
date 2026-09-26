@@ -19,7 +19,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/slobys/SSL-Renewal/main/acme
 | 1）域名证书 | 在本机为域名申请证书 |
 | 2）本机固定 IP 证书 | 云服务器常用；自动识别或手动输入 IP，推荐验证方式 |
 | 3）本机动态 IP 证书 | 在同一子菜单开通、查看、立即检查或停用 IP 变化检测 |
-| 4）远程设备 IP 证书 | 本机代办，证书回传给 OpenWrt / 其他设备使用 |
+| 4）远程 IP 证书 | 云服务器为 OpenWrt 软路由申请并回传证书 |
 | 5）更新 / 重新部署脚本 | 确认后更新，保留证书和配置 |
 | 6）退出 | 结束运行 |
 

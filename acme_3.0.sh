@@ -905,7 +905,7 @@ while true; do
     echo "1）域名证书（本机申请）"
     echo "2）本机固定 IP 证书（云服务器常用）"
     echo "3）本机动态 IP 证书（开通 / 管理）"
-    echo "4）远程设备 IP 证书（给其他设备申请）"
+    echo "4）远程 IP 证书（云服务器给 OpenWrt 软路由申请）"
     echo "5）更新 / 重新部署脚本"
     echo "6）退出"
     echo "============================================"
@@ -925,7 +925,7 @@ while true; do
             manage_dynamic_ip
             ;;
         4)
-            echo "远程模式：本机负责申请，证书部署到另一台设备；无需先开通本机动态模式。"
+            echo "远程模式：云服务器负责申请，证书回传到 OpenWrt 软路由；无需先开通本机动态模式。"
             run_menu_action manage_remote_ip_ssl
             if [ "$MENU_ACTION_STATUS" -ne 0 ]; then pause_menu || return 0; fi
             ;;

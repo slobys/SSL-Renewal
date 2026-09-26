@@ -348,7 +348,7 @@ CHALLENGE_MODE=webroot
         for text in ('6\n', ''):
             with self.subTest(text=text):
                 result = self.navigation(input_text=text)
-                self.assertIn('4）远程设备 IP 证书', result.stdout)
+                self.assertIn('4）远程 IP 证书（云服务器给 OpenWrt 软路由申请）', result.stdout)
                 self.assertNotIn('4）本机动态 IP SSL 管理', result.stdout)
                 self.assertFalse((self.base / 'curl.log').exists())
 
@@ -554,7 +554,7 @@ manage_remote_ip_ssl() { CERT_KIND=ip; echo REMOTE_ONLY; }
     def test_readme_matches_menu_and_stays_concise(self):
         text = (ROOT / 'README.md').read_text()
         self.assertIn('| 3）本机动态 IP 证书 |', text)
-        self.assertIn('| 4）远程设备 IP 证书 |', text)
+        self.assertIn('| 4）远程 IP 证书 | 云服务器为 OpenWrt 软路由申请并回传证书 |', text)
         self.assertIn('进入 **4 → 添加远程设备', text)
         self.assertNotIn('| 4）本机动态 IP 管理 |', text)
         self.assertLessEqual(len(text.splitlines()), 80)
