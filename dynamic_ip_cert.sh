@@ -3,6 +3,11 @@ set -e
 set -o pipefail
 
 CONFIG_FILE="${1:-}"
+SERVER_STATE_DIR="$(dirname "${CONFIG_FILE:-/root/.ssl-renewal/missing.conf}")"
+if [ -e "$SERVER_STATE_DIR/server.uninstalling" ] || [ -e "$SERVER_STATE_DIR/server.uninstalled" ]; then
+    echo "SSL-Renewal 已卸载或正在卸载，跳过任务。"
+    exit 0
+fi
 
 if [ -z "$CONFIG_FILE" ] || [ ! -r "$CONFIG_FILE" ]; then
     echo "❌ 动态 IP 配置文件不存在或不可读：$CONFIG_FILE"
@@ -78,6 +83,7 @@ cleanup_lock() {
 
 trap cleanup_lock EXIT
 trap 'exit 130' INT TERM
+if [ -e "$SERVER_STATE_DIR/server.uninstalling" ] || [ -e "$SERVER_STATE_DIR/server.uninstalled" ]; then exit 0; fi
 
 normalize_public_ip() {
     python3 - "$1" "$2" <<'PY'

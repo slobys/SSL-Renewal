@@ -7,6 +7,7 @@ OW_SELF=${SSL_RENEWAL_OPENWRT_SELF:-/root/.ssl-renewal/openwrt/openwrt_ip_ssl.sh
 OW_ACME=${SSL_RENEWAL_OPENWRT_ACME:-$OW_BASE/client/acme.sh}
 OW_CRONTAB=${SSL_RENEWAL_OPENWRT_CRONTAB:-/etc/crontabs/root}
 OW_INIT=${SSL_RENEWAL_OPENWRT_INIT:-/etc/init.d}
+OW_BACKUPS=${SSL_RENEWAL_OPENWRT_BACKUPS:-/root/ssl-renewal-backups}
 OW_MARKER='# ssl-renewal-openwrt-local'
 OW_WATCH_PID=''
 OW_FW_TAG=''
@@ -399,10 +400,13 @@ ow_deploy() (
 )
 ow_run_check() {
     ow_require
+    [ ! -f "$OW_RUN/uninstalled" ] || { ow_log '本项目已卸载，请重新安装并恢复自动管理。'; return 0; }
     ow_dirs
+    ow_lock
+    # Re-read after taking the uninstall/operation lock, never use stale config.
+    [ ! -f "$OW_RUN/uninstalled" ] || return 0
     ow_load "$1"
     [ ! -f "$DISABLED" ] || { ow_log "IPv$FAMILY 已停用自动管理（证书保留）。"; return 0; }
-    ow_lock
     [ -s "$OW_ACME" ] || ow_die '请先完成开通，专用 ACME 客户端不存在。'
     ow_network || ow_die "接口 $NETWORK 未就绪/地址不可用，请检查 WAN。"
     TARGET=$(ow_detect) || ow_die '未获得可用公网 IP；WAN 为私网时可选择出口检测，但仍需公网端口映射。'
@@ -567,6 +571,7 @@ ow_setup() {
     ow_firewall_kind || ow_die '不支持当前防火墙，未安装自动任务。'
     ow_save_config
     rm -f "$DISABLED" "$RETRY"
+    rm -f "$OW_RUN/uninstalled"
     ow_cron
     exec 9>&-
     ow_log '已启用每 5 分钟检查：IP 变化时重签，IP 未变但证书剩余不足 3 天时续签。'
@@ -581,7 +586,11 @@ ow_toggle() {
     [ -f "$CONF" ] || ow_die '尚未配置。'
     ow_lock
     if [ -f "$DISABLED" ]; then
+        # A keep-data uninstall removes the dedicated client, not its accounts.
+        # Restore it before re-enabling jobs after the user explicitly reinstalls.
+        ow_client
         rm -f "$DISABLED" "$RETRY"
+        rm -f "$OW_RUN/uninstalled"
         ow_cron
         ow_log "IPv$FAMILY 自动管理已恢复。"
     else
@@ -592,6 +601,150 @@ ow_toggle() {
         ow_cron
         ow_log "IPv$FAMILY 自动管理已停用。"
     fi
+}
+# Uninstall never removes shared opkg/apk packages or restores the entire router
+# configuration. Clean mode archives data and relocates only active uHTTPd paths.
+ow_safe_uninstall_path() {
+    case "$1" in /|/etc|/root|/tmp|/usr|/var|/home|''|*/../*|*/..|*/./*|*/.|*'|'*) return 1;; /*) ;; *) return 1;; esac
+    check_path=$1
+    while [ "$check_path" != / ]; do
+        [ ! -L "$check_path" ] || return 1
+        check_path=${check_path%/*}
+        [ -n "$check_path" ] || check_path=/
+    done
+}
+ow_uninstall_luci() (
+    set -e
+    backup=$1
+    snapshot="$backup/uhttpd-paths.before"
+    : > "$snapshot"
+    if ! command -v uci >/dev/null 2>&1; then
+        [ ! -f /etc/config/uhttpd ] || ow_die '缺少 uci，无法安全处理 LuCI 证书路径。'
+        exit 0
+    fi
+    if ! listing=$(uci -q show uhttpd); then
+        [ ! -f /etc/config/uhttpd ] || ow_die '无法读取 uHTTPd，清理已中止。'
+        exit 0
+    fi
+    keys=$(printf '%s\n' "$listing" | awk -F= '$1 ~ /^uhttpd\.[a-zA-Z0-9_@.\[\]-]+\.(cert|key)$/ {print $1}')
+    for option in $keys; do
+        oldpath=$(uci -q get "$option") || exit 1
+        resolved=$(readlink -f "$oldpath" 2>/dev/null || true)
+        case "$resolved" in "$OW_BASE"/*) ;; *)
+            case "$oldpath" in "$OW_BASE"/*) ow_die "证书引用已损坏：$option；请先修复或选择保留卸载。";; esac
+            continue;;
+        esac
+        case "$oldpath$resolved" in *'|'*) ow_die '证书路径含不支持的分隔符。';; esac
+        newpath="$backup/data/${resolved#"$OW_BASE"/}"
+        [ -s "$newpath" ] && cmp -s "$oldpath" "$newpath" || ow_die '证书备份验证失败，保留原部署。'
+        printf '%s|%s|%s\n' "$option" "$oldpath" "$newpath" >> "$snapshot"
+    done
+    [ -s "$snapshot" ] || exit 0
+    changes=$(uci changes uhttpd) || exit 1
+    [ -z "$changes" ] || ow_die 'uHTTPd 有尚未提交的修改，请保存/撤销后再卸载。'
+    [ -x "$OW_INIT/uhttpd" ] || ow_die '找不到 uHTTPd 服务，未删除证书。'
+    done_ok=0
+    rollback_uninstall_uci() {
+        if [ "$done_ok" != 1 ]; then
+            while IFS='|' read -r option oldpath newpath; do uci set "$option=$oldpath" || true; done < "$snapshot"
+            uci commit uhttpd || true
+            "$OW_INIT/uhttpd" restart >/dev/null 2>&1 || true
+        fi
+    }
+    trap rollback_uninstall_uci EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    while IFS='|' read -r option oldpath newpath; do uci set "$option=$newpath"; done < "$snapshot"
+    uci commit uhttpd
+    "$OW_INIT/uhttpd" restart
+    done_ok=1
+    ow_log 'LuCI 已改为读取备份中的同一张证书；保留其他 uHTTPd 设置，不降级到 HTTP。'
+)
+ow_uninstall() {
+    ow_require
+    echo '\n============ OpenWrt 卸载 ============'
+    echo '1）卸载程序（保留证书和配置）【默认】'
+    echo '2）备份后清理本项目证书/配置并卸载（方便重新配置）'
+    echo '0）取消'
+    ow_prompt '请选择 [1]：' || return 0
+    removal=${ANSWER:-1}
+    case "$removal" in 0) return 0;; 1|2) ;; *) ow_log '无效选项，未卸载。'; return 0;; esac
+    echo "将移除本项目自动任务和程序：$OW_SELF"
+    echo "数据目录：$OW_BASE；备份目录：$OW_BACKUPS"
+    echo '两种方式均停止 IP 重签和到期续签；证书会自然过期，不会撤销证书。'
+    echo '不卸载系统依赖，不关闭 cron/防火墙，不修改 SSH 或其他网络设置。'
+    token=UNINSTALL
+    if [ "$removal" = 2 ]; then
+        token=PURGE
+        echo '清理前备份。LuCI 引用会迁移到备份证书并重启 uHTTPd；不是恢复整个旧配置。'
+        echo 'Nginx 等其他服务的证书引用需先自行迁移；确认后才清理本项目数据。'
+    fi
+    ow_prompt "输入 $token 确认（回车取消）：" || return 0
+    [ "$ANSWER" = "$token" ] || { ow_log '已取消，未卸载。'; return 0; }
+    for path in "$OW_BASE" "$OW_RUN" "$OW_SELF" "$OW_CRONTAB" "$OW_BACKUPS"; do
+        ow_safe_uninstall_path "$path" || ow_die "拒绝危险路径或符号链接：$path"
+    done
+    case "$OW_BACKUPS/" in "$OW_BASE/"*|"$OW_RUN/"*) ow_die '备份目录不能放在待清理目录内。';; esac
+    case "$OW_SELF" in "$OW_BASE"/*|"$OW_RUN"/*) ow_die '运行脚本不能位于数据或临时目录。';; esac
+    if [ -e "$OW_SELF" ]; then
+        [ -f "$OW_SELF" ] && grep -q 'ow_main' "$OW_SELF" || ow_die '同名运行文件不属于本项目，拒绝删除。'
+    fi
+    ow_dirs
+    if command -v flock >/dev/null 2>&1; then
+        ow_lock
+    elif [ -f "$OW_BASE/v4.conf" ] || [ -f "$OW_BASE/v6.conf" ] || [ -d "$OW_BASE/acme" ]; then
+        ow_die '已有管理配置但缺少 flock，无法确认任务状态；请修复 flock 后再卸载。'
+    fi
+    # Unknown files inside the private base might belong to a future version or
+    # another application. Do not turn a configuration typo into recursive deletion.
+    if [ "$removal" = 2 ]; then
+        for item in "$OW_BASE"/* "$OW_BASE"/.[!.]* "$OW_BASE"/..?*; do
+            [ -e "$item" ] || [ -L "$item" ] || continue
+            case "${item##*/}" in
+                v4.conf|v6.conf|v4.ip|v6.ip|v4.deployed|v6.deployed|v4.disabled|v6.disabled|certs|pending|acme|client|backups) ;;
+                *) ow_die "数据目录含未知文件，未清理：$item（可选择保留卸载）";;
+            esac
+        done
+    fi
+    mkdir -p "$OW_BACKUPS"
+    chmod 700 "$OW_BACKUPS"
+    backup=$(mktemp -d "$OW_BACKUPS/openwrt-XXXXXX")
+    chmod 700 "$backup"
+    cp -a "$OW_BASE" "$backup/data"
+    [ ! -f "$OW_SELF" ] || cp -p "$OW_SELF" "$backup/openwrt_ip_ssl.sh"
+    had_cron=0
+    if [ -f "$OW_CRONTAB" ]; then
+        had_cron=1
+        cp -p "$OW_CRONTAB" "$backup/crontab.before"
+        # Exact generated command + marker, never grep out another job's comment.
+        expected="*/5 * * * * /bin/sh $OW_SELF check-all >/dev/null 2>&1 $OW_MARKER"
+        awk -v expected="$expected" '$0!=expected' "$OW_CRONTAB" > "$backup/crontab.after"
+    fi
+    if [ "$removal" = 2 ]; then ow_uninstall_luci "$backup"; fi
+    if [ "$had_cron" = 1 ]; then
+        cmp -s "$OW_CRONTAB" "$backup/crontab.before" || ow_die 'crontab 已变化，未覆盖，请重试。'
+        if ! cmp -s "$backup/crontab.before" "$backup/crontab.after"; then
+            cp "$backup/crontab.after" "$OW_CRONTAB.sslrenewal-uninstall"
+            chmod 600 "$OW_CRONTAB.sslrenewal-uninstall"
+            mv -f "$OW_CRONTAB.sslrenewal-uninstall" "$OW_CRONTAB"
+        fi
+    fi
+    : > "$OW_RUN/uninstalled"
+    if [ "$removal" = 2 ]; then
+        rm -rf "$OW_BASE"
+    else
+        for f in 4 6; do [ ! -f "$OW_BASE/v$f.conf" ] || : > "$OW_BASE/v$f.disabled"; done
+        # Only the dedicated downloaded client is a removable program. Shared
+        # /root/.acme.sh and system ACME packages are never uninstall targets.
+        if [ ! -L "$OW_BASE/client" ] && [ ! -L "$OW_BASE/client/acme.sh" ]; then
+            rm -f "$OW_BASE/client/acme.sh"
+        fi
+    fi
+    rm -f "$OW_SELF"
+    # Keep the lock inode and shared packages; no killall, cron disable or nft flush.
+    ow_log "卸载完成，备份：$backup"
+    ow_log '重新运行原安装命令即可安装；保留配置重装后需从菜单恢复自动管理。'
+    ow_log '正在使用的备份证书也会到期，请及时重装或切换到其他续期方案。'
 }
 ow_main() {
     ow_require
@@ -608,6 +761,7 @@ ow_main() {
             ;;
         status) ow_status;;
         toggle) ow_toggle;;
+        uninstall) ow_uninstall;;
         menu)
             while :; do
                 printf '\n============ OpenWrt 本机 IP 证书 ============\n'
@@ -616,6 +770,7 @@ ow_main() {
                 echo '2）查看状态 / 证书路径'
                 echo '3）立即检查 IP 和证书有效期'
                 echo '4）停用 / 恢复自动管理（保留证书）'
+                echo '5）卸载 OpenWrt 本机模式'
                 echo '0）退出'
                 ow_prompt '请选择：' || return 0
                 case "$ANSWER" in
@@ -623,12 +778,17 @@ ow_main() {
                     2) if sh "$OW_SELF" status; then :; else echo '状态读取失败。'; fi;;
                     3) if sh "$OW_SELF" check-all; then :; else echo '检查未完成，请查看日志；不会自动强制重签。'; fi;;
                     4) if sh "$OW_SELF" toggle; then :; else echo '操作未完成。'; fi;;
+                    5)
+                        if sh "$OW_SELF" uninstall; then
+                            [ -f "$OW_SELF" ] || return 0
+                        else echo '卸载未完成，证书和配置请勿手动删除，检查上方提示。'; fi
+                        ;;
                     0) return 0;;
                     *) echo '无效选项。';;
                 esac
             done
             ;;
-        *) ow_die '用法：openwrt_ip_ssl.sh [menu|setup|status|check 4/6|check-all|toggle]';;
+        *) ow_die '用法：openwrt_ip_ssl.sh [menu|setup|status|check 4/6|check-all|toggle|uninstall]';;
     esac
 }
 

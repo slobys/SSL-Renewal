@@ -50,6 +50,7 @@ if ! command -v git >/dev/null 2>&1; then
     esac
 fi
 
+[ ! -e /root/.ssl-renewal/server.uninstalling ] || { echo '卸载操作尚未结束，暂不重装。'; exit 1; }
 git clone --depth 1 --branch main https://github.com/slobys/SSL-Renewal.git "$DOWNLOAD_DIR/repo"
 for file in acme.sh acme_3.0.sh dynamic_ip_cert.sh remote_ip_ssl.sh openwrt_ip_ssl.sh; do
     bash -n "$DOWNLOAD_DIR/repo/$file"
@@ -57,6 +58,9 @@ done
 for file in acme.sh acme_3.0.sh dynamic_ip_cert.sh remote_ip_ssl.sh openwrt_ip_ssl.sh; do
     install -m 700 "$DOWNLOAD_DIR/repo/$file" "/root/$file"
 done
+install -m 700 "$DOWNLOAD_DIR/repo/uninstall_server.py" /root/uninstall_server.py
+# Reinstallation only clears our stop marker; it does not silently recreate cron jobs.
+rm -f /root/.ssl-renewal/server.uninstalled
 # Retain the legacy remote runner for existing installations; do not migrate,
 # disable or delete anyone's old scheduled remote jobs merely by updating scripts.
 bash /root/acme_3.0.sh

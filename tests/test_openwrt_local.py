@@ -74,6 +74,10 @@ if name=='uci':
         k,v=args[1].split('=',1);db[k]=v;save('uci.json',db)
     elif args[0]=='delete':
         db.pop(args[1],None);save('uci.json',db)
+    elif args[0]=='show':
+        for k,v in db.items():
+            if k.startswith('uhttpd.'): print(k+"='"+v+"'")
+    elif args[0]=='changes': print(os.environ.get('MOCK_UCI_CHANGES',''),end='')
     elif args[0]=='export': print(json.dumps(db))
     elif args[0]!='commit': sys.exit(20)
     sys.exit(0)
@@ -165,6 +169,7 @@ class OpenWrtLocalTests(unittest.TestCase):
                         SSL_RENEWAL_OPENWRT_BASE=str(self.base), SSL_RENEWAL_OPENWRT_RUN=str(self.run),
                         SSL_RENEWAL_OPENWRT_ACME=str(self.acme), SSL_RENEWAL_OPENWRT_SELF=str(self.wrapper),
                         SSL_RENEWAL_OPENWRT_INIT=str(self.init),
+                        SSL_RENEWAL_OPENWRT_BACKUPS=str(self.p/'backups'),
                         SSL_RENEWAL_OPENWRT_CRONTAB=str(self.p/'crontab'),
                         PYTHONDONTWRITEBYTECODE='1')
         self.network()
@@ -526,6 +531,165 @@ class OpenWrtLocalTests(unittest.TestCase):
         self.assertEqual(old,os.readlink(self.base/'certs/v4/current'))
         self.assertTrue((self.run/'v4.retry').exists())
         self.assert_firewall_clean()
+
+    def uninstall_cron(self):
+        own='*/5 * * * * /bin/sh %s check-all >/dev/null 2>&1 # ssl-renewal-openwrt-local\n' % self.wrapper
+        other='0 2 * * * /another/job # ssl-renewal-openwrt-local unrelated\n'
+        (self.p/'crontab').write_text(own+other)
+        return other
+
+    def test_uninstall_cancel_and_eof_have_no_effects(self):
+        old=self.wrapper.read_bytes()
+        conf=(self.base/'v4.conf').read_bytes()
+        for text in ('','0\n','wrong\n','1\n','2\nno\n'):
+            self.cli('uninstall',input_text=text)
+        self.assertEqual(old,self.wrapper.read_bytes())
+        self.assertEqual(conf,(self.base/'v4.conf').read_bytes())
+        self.assertFalse((self.p/'backups').exists())
+        self.assertFalse(self.calls('uci'))
+
+    def test_uninstall_keep_stops_own_jobs_preserves_cert_and_uci(self):
+        self.config(DEPLOY='uhttpd'); self.cli('check','4')
+        before=(self.base/'certs/v4/current/fullchain.pem').read_bytes()
+        uci=(self.p/'uci.json').read_bytes()
+        other=self.uninstall_cron()
+        result=self.cli('uninstall',input_text='1\nUNINSTALL\n')
+        self.assertIn('卸载完成',result.stdout)
+        self.assertFalse(self.wrapper.exists())
+        self.assertTrue((self.base/'v4.disabled').exists())
+        self.assertEqual(before,(self.base/'certs/v4/current/fullchain.pem').read_bytes())
+        self.assertEqual(uci,(self.p/'uci.json').read_bytes())
+        self.assertEqual(other,(self.p/'crontab').read_text())
+        self.assertTrue((self.run/'uninstalled').exists())
+        self.assertFalse(self.calls('opkg'))
+
+    def test_uninstall_purge_archives_data_and_preserves_shared_client(self):
+        self.cli('check','4'); other=self.uninstall_cron()
+        old=(self.base/'certs/v4/current/fullchain.pem').read_bytes()
+        self.cli('uninstall',input_text='2\nPURGE\n')
+        self.assertFalse(self.base.exists()); self.assertFalse(self.wrapper.exists())
+        self.assertTrue(self.acme.exists())
+        backup=next((self.p/'backups').iterdir())
+        self.assertEqual(0o700,backup.stat().st_mode & 0o777)
+        self.assertEqual(old,(backup/'data/certs/v4/current/fullchain.pem').read_bytes())
+        self.assertEqual(other,(self.p/'crontab').read_text())
+        self.assertFalse(self.calls('uhttpd'))
+
+    def test_uninstall_purge_migrates_luci_references_only(self):
+        self.config(DEPLOY='uhttpd'); self.cli('check','4')
+        original=(self.base/'certs/v4/current/fullchain.pem').read_bytes()
+        db=json.loads((self.p/'uci.json').read_text())
+        db['uhttpd.main.listen_http']='192.168.2.1:8888'
+        (self.p/'uci.json').write_text(json.dumps(db))
+        self.uninstall_cron()
+        self.cli('uninstall',input_text='2\nPURGE\n')
+        after=json.loads((self.p/'uci.json').read_text())
+        self.assertEqual('192.168.2.1:8888',after['uhttpd.main.listen_http'])
+        self.assertEqual(original,Path(after['uhttpd.main.cert']).read_bytes())
+        self.assertTrue(Path(after['uhttpd.main.key']).is_file())
+        self.assertTrue(after['uhttpd.main.cert'].startswith(str(self.p/'backups')))
+        self.assertFalse(self.base.exists())
+
+    def test_uninstall_purge_reload_failure_rolls_back_and_keeps_files(self):
+        self.config(DEPLOY='uhttpd'); self.cli('check','4'); self.uninstall_cron()
+        before=(self.p/'uci.json').read_bytes(); cron=(self.p/'crontab').read_bytes()
+        result=self.cli('uninstall',input_text='2\nPURGE\n',env={'MOCK_RELOAD_FAIL':'1'},expected=None)
+        self.assertNotEqual(0,result.returncode)
+        self.assertEqual(before,(self.p/'uci.json').read_bytes())
+        self.assertEqual(cron,(self.p/'crontab').read_bytes())
+        self.assertTrue(self.wrapper.exists()); self.assertTrue(self.base.exists())
+        self.assertFalse((self.run/'uninstalled').exists())
+
+    def test_uninstall_pending_uci_edit_blocks_clean_mode(self):
+        self.config(DEPLOY='uhttpd'); self.cli('check','4'); self.uninstall_cron()
+        result=self.cli('uninstall',input_text='2\nPURGE\n',env={'MOCK_UCI_CHANGES':"uhttpd.main.foo='pending'"},expected=None)
+        self.assertNotEqual(0,result.returncode)
+        self.assertTrue(self.wrapper.exists()); self.assertTrue(self.base.exists())
+
+    def test_uninstall_busy_operation_does_not_delete(self):
+        cron=self.uninstall_cron(); before=(self.p/'crontab').read_bytes()
+        with (self.run/'operation.lock').open('w') as lock:
+            fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            result=self.cli('uninstall',input_text='2\nPURGE\n')
+        self.assertIn('已有证书操作',result.stdout)
+        self.assertTrue(self.wrapper.exists()); self.assertTrue(self.base.exists())
+        self.assertEqual(before,(self.p/'crontab').read_bytes())
+        self.assertFalse((self.p/'backups').exists())
+
+    def test_uninstall_does_not_follow_backup_or_data_symlinks(self):
+        victim=self.p/'victim'; victim.mkdir(); (victim/'important').write_text('keep')
+        (self.p/'backups').symlink_to(victim,target_is_directory=True)
+        result=self.cli('uninstall',input_text='2\nPURGE\n',expected=None)
+        self.assertNotEqual(0,result.returncode)
+        self.assertTrue(self.wrapper.exists()); self.assertEqual('keep',(victim/'important').read_text())
+
+    def test_uninstall_reinstall_keep_config_can_resume(self):
+        wrapper=self.wrapper.read_bytes(); self.cli('check','4')
+        self.cli('uninstall',input_text='1\nUNINSTALL\n')
+        self.wrapper.write_bytes(wrapper); self.wrapper.chmod(0o700)
+        self.cli('check','4')
+        self.assertEqual(1,len(self.calls('fake-acme-tool','--issue')))
+        self.cli('toggle',input_text='1\n')
+        self.assertFalse((self.run/'uninstalled').exists())
+        self.assertFalse((self.base/'v4.disabled').exists())
+        self.assertIn('check-all',(self.p/'crontab').read_text())
+
+    def test_uninstall_refuses_unknown_files_in_clean_scope(self):
+        (self.base/'unrelated.conf').write_text('keep')
+        result=self.cli('uninstall',input_text='2\nPURGE\n',expected=None)
+        self.assertNotEqual(0,result.returncode)
+        self.assertTrue(self.wrapper.exists())
+        self.assertEqual('keep',(self.base/'unrelated.conf').read_text())
+
+    def test_uninstall_unconfigured_program_does_not_require_flock(self):
+        (self.base/'v4.conf').unlink()
+        body='''ow_require() { :; }
+command() {
+    if [ "$1" = -v ] && [ "$2" = flock ]; then return 1; fi
+    builtin command "$@"
+}
+ow_uninstall
+'''
+        result=self.shell(body,input_text='1\nUNINSTALL\n',interpreter=['bash'])
+        self.assertIn('卸载完成',result.stdout)
+        self.assertFalse(self.wrapper.exists())
+
+    def test_uninstall_keep_removes_only_dedicated_client(self):
+        client=self.base/'client';client.mkdir()
+        (client/'acme.sh').write_text('# dedicated ACME')
+        self.cli('uninstall',input_text='1\nUNINSTALL\n')
+        self.assertFalse((client/'acme.sh').exists())
+        self.assertTrue(self.acme.exists())
+        backup=next((self.p/'backups').iterdir())
+        self.assertTrue((backup/'data/client/acme.sh').exists())
+
+    def test_reinstall_restore_fetches_client_before_enabling_jobs(self):
+        (self.base/'v4.disabled').touch(); (self.run/'uninstalled').touch()
+        body='''ow_require() { :; }
+ow_client() { echo CLIENT_RESTORED; }
+ow_toggle
+'''
+        result=self.shell(body,input_text='1\n')
+        self.assertIn('CLIENT_RESTORED',result.stdout)
+        self.assertFalse((self.run/'uninstalled').exists())
+        self.assertIn('check-all',(self.p/'crontab').read_text())
+
+    def test_uninstall_native_menu_exits_after_removal(self):
+        result=self.cli('menu',input_text='5\n1\nUNINSTALL\n')
+        self.assertIn('卸载完成',result.stdout)
+        self.assertFalse(self.wrapper.exists())
+
+    def test_uninstall_stale_check_observes_stop_marker(self):
+        (self.run/'uninstalled').touch()
+        self.cli('check','4')
+        self.assertFalse(self.calls('fake-acme-tool'))
+
+    def test_uninstall_shell_guard_and_idempotent_no_install(self):
+        self.shell('ow_require() { :; }; ow_uninstall',input_text='2\nPURGE\n',
+                   interpreter=['busybox','ash'] if shutil.which('busybox') else None)
+        self.shell('ow_require() { :; }; ow_uninstall',input_text='2\nPURGE\n')
+        self.assertFalse(self.base.exists())
+        self.assertFalse(self.calls('opkg'))
 
     def test_bootstrap_openwrt_before_bash_git_or_linux_packages(self):
         # Emulate filesystem identity ONLY in an isolated copy of the actual entry.

@@ -559,6 +559,31 @@ manage_openwrt_local() { CERT_KIND=ip; echo OPENWRT_ONLY; }
         self.assertNotIn('| 4）本机动态 IP 管理 |', text)
         self.assertLessEqual(len(text.splitlines()), 80)
 
+    def test_server_uninstall_cancel_returns_to_menu(self):
+        result = self.navigation('uninstall_server_menu() { echo CANCELLED; return 2; }', '7\n6\n')
+        self.assertIn('7）卸载服务器端', result.stdout)
+        self.assertIn('CANCELLED', result.stdout)
+        self.assertIn('已退出', result.stdout)
+        self.assertEqual(2, result.stdout.count('SSL证书管理菜单'))
+
+    def test_server_uninstall_success_exits_old_menu(self):
+        result = self.navigation('uninstall_server_menu() { echo UNINSTALLED; return 0; }', '7\n')
+        self.assertIn('UNINSTALLED', result.stdout)
+        self.assertEqual(1, result.stdout.count('SSL证书管理菜单'))
+        self.assertFalse((self.base / 'acme.log').exists())
+
+    def test_server_uninstall_error_does_not_exit_navigation(self):
+        result = self.navigation('uninstall_server_menu() { echo UNINSTALL_ERROR; return 1; }', '7\n\n6\n')
+        self.assertIn('UNINSTALL_ERROR', result.stdout)
+        self.assertIn('已退出', result.stdout)
+
+    def test_already_uninstalled_menu_does_not_issue_cert(self):
+        directory=self.base / 'dynamic'; directory.mkdir()
+        (directory / 'server.uninstalled').touch()
+        result=self.navigation(input_text='2\n')
+        self.assertIn('正在卸载或已卸载', result.stdout)
+        self.assertFalse((self.base / 'curl.log').exists())
+
     def test_install_failure_is_not_reported_as_success(self):
         result = self.shell('ACME_BIN="$TEST_DIR/bin/fake-acme"; IDENTIFIER=45.77.170.45; '
                             'issue_static_certificate; echo FALSE_SUCCESS',

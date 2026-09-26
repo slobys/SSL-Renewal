@@ -9,6 +9,11 @@ LOG_DIR="$BASE_DIR/logs"
 RUNNER="${SSL_RENEWAL_REMOTE_RUNNER:-$BASE_DIR/remote_ip_ssl.sh}"
 ACME_BIN="${SSL_RENEWAL_ACME_BIN:-/root/.acme.sh/acme.sh}"
 SSH_KEY="${SSL_RENEWAL_SSH_KEY:-/root/.ssh/id_ed25519}"
+SERVER_STATE_DIR="$(dirname "$BASE_DIR")"
+if [ -e "$SERVER_STATE_DIR/server.uninstalling" ] || [ -e "$SERVER_STATE_DIR/server.uninstalled" ]; then
+    echo "SSL-Renewal 已卸载或正在卸载，跳过远程任务。"
+    exit 0
+fi
 
 mkdir -p "$DEVICE_DIR" "$CERT_DIR" "$LOG_DIR"
 chmod 700 "$BASE_DIR" "$DEVICE_DIR" "$CERT_DIR" "$LOG_DIR"

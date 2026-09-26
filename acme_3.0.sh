@@ -897,11 +897,25 @@ manage_openwrt_local() {
     sh "$target_dir/openwrt_ip_ssl.sh" menu
 }
 
+uninstall_server_menu() {
+    if [ -f /etc/openwrt_release ]; then
+        echo "请进入 OpenWrt 本机菜单的卸载入口。"
+        return 2
+    fi
+    command -v python3 >/dev/null 2>&1 || { echo "安全卸载需要 Python 3；尚未安装时请先安装 python3。"; return 1; }
+    [ -f "$SCRIPT_DIR/uninstall_server.py" ] || { echo "卸载组件缺失，请先更新脚本。"; return 1; }
+    python3 "$SCRIPT_DIR/uninstall_server.py"
+}
+
 main() {
 require_root
 
-local update_confirm
+local update_confirm uninstall_rc
 while true; do
+    if [ -e "$DYNAMIC_DIR/server.uninstalling" ] || [ -e "$DYNAMIC_DIR/server.uninstalled" ]; then
+        echo "本项目正在卸载或已卸载，请重新执行安装入口。"
+        return 0
+    fi
     CERT_KIND=""
     clear 2>/dev/null || true
     echo "============== SSL证书管理菜单 =============="
@@ -911,9 +925,10 @@ while true; do
     echo "4）OpenWrt 本机模式（软路由动态 IP / 自动续期）"
     echo "5）更新 / 重新部署脚本"
     echo "6）退出"
+    echo "7）卸载服务器端（保留证书 / 清理配置）"
     echo "============================================"
     echo "提示：云服务器自己用选 2；软路由请在 OpenWrt 上运行本机模式。"
-    read -r -p "请输入选项（1-6）： " MAIN_OPTION || return 0
+    read -r -p "请输入选项（1-7）： " MAIN_OPTION || return 0
 
     case "$MAIN_OPTION" in
         1)
@@ -941,6 +956,15 @@ while true; do
                     pause_menu || return 0
                     ;;
                 *) echo "已取消更新。" ;;
+            esac
+            ;;
+        7)
+            uninstall_rc=0
+            uninstall_server_menu || uninstall_rc=$?
+            case "$uninstall_rc" in
+                0) return 0 ;;
+                2) ;; # Cancelled: retain the menu and all existing installation data.
+                *) pause_menu || return 0 ;;
             esac
             ;;
         6)

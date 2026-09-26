@@ -30,6 +30,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/slobys/SSL-Renewal/main/acme
 | 4）OpenWrt 本机模式 | **软路由自己申请、保存和续期**；必须在软路由运行 |
 | 5）更新 / 重新部署脚本 | 保留证书和配置 |
 | 6）退出 | 结束运行 |
+| 7）卸载服务器端 | 保留证书卸载，或备份后清理本项目配置 |
 
 ## OpenWrt 怎么用
 
@@ -53,6 +54,16 @@ bash <(curl -fsSL https://raw.githubusercontent.com/slobys/SSL-Renewal/main/acme
 | OpenWrt IPv6 | 上述路径中的 `v4` 改为 `v6` |
 
 软路由配置和私钥留在本机；日志：`logread -e ssl-renewal-openwrt`。不要给同一 uHTTPd 实例配置两张不同地址族的单 IP 证书互相覆盖。
+
+## 卸载 / 重装
+
+**服务器选主菜单 7；软路由选本机菜单 5。** 回车默认保留证书与配置，输入 `UNINSTALL` 才执行；清理模式需输入 `PURGE`，两种方式都会先备份到 `/root/ssl-renewal-backups/`。
+
+服务器卸载只移除本项目脚本、动态/旧远程任务；清理模式再删除对应配置和日志。**服务器证书、共享 `~/.acme.sh` 及其续期任务保留**，不会猜测删除旧版证书，也不连接远端设备。
+
+OpenWrt 卸载会停止重签和续签；清理模式会删除本项目专用数据，若 LuCI 正在引用证书，先改为读取备份证书并重启 uHTTPd，失败则中止清理。其他服务引用需先自行迁移。备份证书同样会自然过期。
+
+不卸载系统依赖，不关闭防火墙/cron，不改 SSH；正在签发时不强杀任务。重装执行原命令，保留配置的软路由需从菜单恢复自动管理；备份含私钥，请妥善保管。
 
 ## 必要提醒
 
