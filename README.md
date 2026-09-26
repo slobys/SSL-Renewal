@@ -4,21 +4,23 @@
 
 ## 一键运行
 
-**OpenWrt / iStoreOS：直接在软路由 SSH 终端以 root 执行。** 自动进入本机模式，不需要云服务器、SSH 回传、Bash、Python 或 Git。
+**服务器与 OpenWrt / iStoreOS 使用同一个命令：直接在目标设备的 SSH 终端以 root 执行。**
 
 ```sh
-wget -O /tmp/ssl-renewal-install.sh https://raw.githubusercontent.com/slobys/SSL-Renewal/main/acme.sh && sh /tmp/ssl-renewal-install.sh
+sh -c '
+f=$(mktemp /tmp/ssl-renewal.XXXXXX) || exit 1
+trap "rm -f \"$f\"" EXIT
+if command -v curl >/dev/null 2>&1; then
+  curl -q -fsSL "$1" -o "$f"
+else
+  wget -O "$f" "$1"
+fi && test -s "$f" && sh -n "$f" && sh "$f"
+' sh https://raw.githubusercontent.com/slobys/SSL-Renewal/main/acme.sh
 ```
 
-下载失败时检查网络与 CA 根证书；也可用 `curl -fsSL URL -o /tmp/ssl-renewal-install.sh`。不要关闭 TLS 校验。
+自动识别系统：Linux 服务器进入服务器菜单；OpenWrt / iStoreOS 请直接在软路由运行，自动进入本机菜单，无需云服务器、Bash、Python 或 Git。
 
-**Ubuntu / Debian / CentOS / RHEL 等服务器：** 原命令保持可用。
-
-```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/slobys/SSL-Renewal/main/acme.sh)
-```
-
-再次执行更新脚本，保留证书和配置。旧远程模式退出主菜单，已有远程任务不会自动迁移或删除。
+自动选择 `curl` 或支持 HTTPS 的 `wget`；下载失败不执行，不关闭 TLS 校验。再次运行可更新脚本，保留证书和配置；旧安装命令仍可用，已有远程任务不自动迁移或删除。
 
 ## 主菜单
 
