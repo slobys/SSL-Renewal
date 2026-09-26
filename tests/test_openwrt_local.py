@@ -500,6 +500,8 @@ class OpenWrtLocalTests(unittest.TestCase):
         for text in ('','0\n','wrong\n0\n'):
             r=self.cli('menu',input_text=text)
             self.assertIn('OpenWrt 本机 IP 证书',r.stdout)
+            self.assertIn('1）申请 / 重新配置（动态或固定公网 IP）',r.stdout)
+            self.assertNotIn('1）开通 / 重新配置（动态或固定公网 IP）',r.stdout)
         self.assertFalse(self.calls('fake-acme-tool'))
 
     def test_status_before_and_after_success(self):

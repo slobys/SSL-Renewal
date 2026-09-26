@@ -34,7 +34,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/slobys/SSL-Renewal/main/acme
 
 ## OpenWrt 怎么用
 
-选择 **开通 / 重新配置 → IPv4 或 IPv6 → 动态公网 IP**，填写邮箱；接口通常为 `wan` / `wan6`。自动检测取 WAN 接口地址；光猫路由时可改选出口检测，固定模式支持手动 IP。
+选择 **申请 / 重新配置 → IPv4 或 IPv6 → 动态公网 IP**，填写邮箱；接口通常为 `wan` / `wan6`。自动检测取 WAN 接口地址；光猫路由时可改选出口检测，固定模式支持手动 IP。
 
 验证选择 **HTTP-01（公网 TCP80）** 或 **TLS-ALPN-01（公网 TCP443）**。脚本只在验证期间把选定 WAN 入口转到本机专用端口，不停止 LuCI、不关闭防火墙、不修改 Dropbear；该公网端口的普通访问会短暂中断。
 
