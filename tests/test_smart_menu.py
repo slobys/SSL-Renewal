@@ -348,7 +348,7 @@ CHALLENGE_MODE=webroot
         for text in ('6\n', ''):
             with self.subTest(text=text):
                 result = self.navigation(input_text=text)
-                self.assertIn('4）远程 IP 证书（云服务器给 OpenWrt 软路由申请）', result.stdout)
+                self.assertIn('4）OpenWrt 本机模式（软路由动态 IP / 自动续期）', result.stdout)
                 self.assertNotIn('4）本机动态 IP SSL 管理', result.stdout)
                 self.assertFalse((self.base / 'curl.log').exists())
 
@@ -504,17 +504,17 @@ esac
         body = '''
 setup_dynamic_ip_certificate() { echo WRONG_LOCAL_SETUP; exit 90; }
 manage_dynamic_ip() { echo WRONG_LOCAL_MENU; exit 91; }
-manage_remote_ip_ssl() { CERT_KIND=ip; echo REMOTE_ONLY; }
+manage_openwrt_local() { CERT_KIND=ip; echo OPENWRT_ONLY; }
 '''
         result = self.navigation(body, '4\n6\n')
-        self.assertIn('REMOTE_ONLY', result.stdout)
+        self.assertIn('OPENWRT_ONLY', result.stdout)
         self.assertNotIn('WRONG_LOCAL', result.stdout)
         self.assertFalse((self.base / 'dynamic').exists())
         self.assertFalse((self.base / 'curl.log').exists())
         self.assertEqual(2, result.stdout.count('SSL证书管理菜单'))
 
     def test_remote_action_error_returns_to_main(self):
-        result = self.navigation('manage_remote_ip_ssl() { exit 27; }', '4\n\n6\n')
+        result = self.navigation('manage_openwrt_local() { exit 27; }', '4\n\n6\n')
         self.assertIn('退出码 27', result.stdout)
         self.assertIn('已退出', result.stdout)
 
@@ -548,14 +548,14 @@ manage_remote_ip_ssl() { CERT_KIND=ip; echo REMOTE_ONLY; }
 
     def test_manual_ip_hint_uses_new_remote_entry(self):
         result = self.shell('select_public_ip', '3\n' + V4 + '\n')
-        self.assertIn('主菜单 4 的远程设备模式', result.stdout)
+        self.assertIn('直接在 OpenWrt 上运行主菜单 4 对应的本机模式', result.stdout)
         self.assertNotIn('主菜单 5 的远程模式', result.stdout)
 
     def test_readme_matches_menu_and_stays_concise(self):
         text = (ROOT / 'README.md').read_text()
         self.assertIn('| 3）本机动态 IP 证书 |', text)
-        self.assertIn('| 4）远程 IP 证书 | 云服务器为 OpenWrt 软路由申请并回传证书 |', text)
-        self.assertIn('进入 **4 → 添加远程设备', text)
+        self.assertIn('| 4）OpenWrt 本机模式 |', text)
+        self.assertIn('直接在软路由', text)
         self.assertNotIn('| 4）本机动态 IP 管理 |', text)
         self.assertLessEqual(len(text.splitlines()), 80)
 

@@ -196,7 +196,7 @@ select_public_ip() {
             echo "✅ 已选择 IPv${IP_VERSION}：$IDENTIFIER（$IP_SELECTION_MODE）"
             if [ "$IP_SELECTION_MODE" = "手动输入" ]; then
                 echo "ℹ️ 手动填写不会转移验证地点；目标 IP 的验证请求必须能到达本机。"
-                echo "   云服务器替家中软路由申请，请使用主菜单 4 的远程设备模式。"
+                echo "   软路由证书请直接在 OpenWrt 上运行主菜单 4 对应的本机模式。"
             fi
             return 0
         else
@@ -874,24 +874,27 @@ update_script() (
     bash "$downloaded"
 )
 
-manage_remote_ip_ssl() {
-    detect_os
-    install_dependencies
-
-    mkdir -p "$REMOTE_DIR"
-    chmod 700 "$REMOTE_DIR"
-
-    if [ -f "$SCRIPT_DIR/remote_ip_ssl.sh" ]; then
-        install -m 700 "$SCRIPT_DIR/remote_ip_ssl.sh" "$REMOTE_RUNNER"
-    else
-        echo "📥 正在下载远程 IP SSL 管理脚本..."
-        curl -fsSL \
-            https://raw.githubusercontent.com/slobys/SSL-Renewal/main/remote_ip_ssl.sh \
-            -o "$REMOTE_RUNNER"
-        chmod 700 "$REMOTE_RUNNER"
+manage_openwrt_local() {
+    if [ ! -f /etc/openwrt_release ]; then
+        echo "第 4 项需要直接在 OpenWrt 软路由上运行，不再由云服务器代办。"
+        echo "请在软路由 SSH 终端执行："
+        echo "wget -O /tmp/ssl-renewal-install.sh https://raw.githubusercontent.com/slobys/SSL-Renewal/main/acme.sh && sh /tmp/ssl-renewal-install.sh"
+        echo "不会安装远程组件、连接其他设备或修改本机网络。"
+        pause_menu || true
+        return 0
     fi
-
-    "$REMOTE_RUNNER" menu
+    local target_dir="/root/.ssl-renewal/openwrt"
+    mkdir -p "$target_dir"
+    chmod 700 "$target_dir"
+    if [ ! -f "$SCRIPT_DIR/openwrt_ip_ssl.sh" ]; then
+        echo "请重新运行安装入口，下载 OpenWrt 本机脚本。"
+        return 1
+    fi
+    sh -n "$SCRIPT_DIR/openwrt_ip_ssl.sh" || return 1
+    cp "$SCRIPT_DIR/openwrt_ip_ssl.sh" "$target_dir/openwrt_ip_ssl.sh.new"
+    chmod 700 "$target_dir/openwrt_ip_ssl.sh.new"
+    mv -f "$target_dir/openwrt_ip_ssl.sh.new" "$target_dir/openwrt_ip_ssl.sh"
+    sh "$target_dir/openwrt_ip_ssl.sh" menu
 }
 
 main() {
@@ -905,11 +908,11 @@ while true; do
     echo "1）域名证书（本机申请）"
     echo "2）本机固定 IP 证书（云服务器常用）"
     echo "3）本机动态 IP 证书（开通 / 管理）"
-    echo "4）远程 IP 证书（云服务器给 OpenWrt 软路由申请）"
+    echo "4）OpenWrt 本机模式（软路由动态 IP / 自动续期）"
     echo "5）更新 / 重新部署脚本"
     echo "6）退出"
     echo "============================================"
-    echo "提示：给当前云服务器用选 2；替家中软路由申请选 4。"
+    echo "提示：云服务器自己用选 2；软路由请在 OpenWrt 上运行本机模式。"
     read -r -p "请输入选项（1-6）： " MAIN_OPTION || return 0
 
     case "$MAIN_OPTION" in
@@ -925,8 +928,7 @@ while true; do
             manage_dynamic_ip
             ;;
         4)
-            echo "远程模式：云服务器负责申请，证书回传到 OpenWrt 软路由；无需先开通本机动态模式。"
-            run_menu_action manage_remote_ip_ssl
+            run_menu_action manage_openwrt_local
             if [ "$MENU_ACTION_STATUS" -ne 0 ]; then pause_menu || return 0; fi
             ;;
         5)

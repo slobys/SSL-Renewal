@@ -1,61 +1,62 @@
-#!/bin/bash
-set -e
-set -o pipefail
-
-if [ "${EUID}" -ne 0 ]; then
-    echo "❌ 请使用 root 用户运行此安装入口。"
-    exit 1
-fi
-
-# ========= 检查并安装 git =========
-echo "🔍 正在检查 git 是否已安装..."
-if ! command -v git >/dev/null 2>&1; then
-    echo "⚠️ 未检测到 git，正在尝试安装..."
-
-    # 判断系统类型
-    if [ -f /etc/os-release ]; then
-        . /etc/os-release
-        OS_ID=$ID
-    else
-        OS_ID=$(uname -s)
-    fi
-
-    if [[ "$OS_ID" == "debian" || "$OS_ID" == "ubuntu" ]]; then
-        apt-get update -y
-        apt-get install git -y || {
-            echo "❌ git 安装失败，请先手动运行以下命令："
-            echo "sudo apt update -y && sudo apt install git -y"
-            exit 1
-        }
-    elif [[ "$OS_ID" =~ ^(centos|rhel|rocky|almalinux|fedora)$ ]]; then
-        PM=yum
-        command -v dnf >/dev/null 2>&1 && PM=dnf
-        "$PM" install git -y || {
-            echo "❌ git 安装失败，请先手动运行以下命令："
-            echo "sudo yum update -y && sudo yum install git -y"
-            exit 1
-        }
-    else
-        echo "❌ 无法识别的系统类型，请手动安装 git。"
-        exit 1
-    fi
-else
-    echo "✅ git 已安装。"
-fi
-
-# ========= 只更新运行脚本，保留证书、配置和用户文件 =========
-# Do not move every repository entry into /root: tests/docs directories can
-# collide on a second invocation. Only install the four known runtime scripts.
-DOWNLOAD_DIR="$(mktemp -d /tmp/ssl-renewal.XXXXXX)"
-trap 'rm -rf -- "$DOWNLOAD_DIR"' EXIT
+#!/bin/sh
+# Portable entry point: OpenWrt must be detected BEFORE requiring Bash or Git.
+set -eu
+[ "$(id -u)" = 0 ] || { echo '请使用 root 运行。'; exit 1; }
+DOWNLOAD_DIR=$(mktemp -d /tmp/ssl-renewal.XXXXXX)
+trap 'rm -rf "$DOWNLOAD_DIR"' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+
+fetch_script() {
+    if command -v curl >/dev/null 2>&1; then
+        curl -q -fsS --proto '=https' --connect-timeout 10 --max-time 120 "$1" -o "$2"
+    elif command -v uclient-fetch >/dev/null 2>&1; then
+        uclient-fetch -O "$2" "$1"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -T 30 -O "$2" "$1"
+    else
+        echo '请先安装 curl 或支持 HTTPS 的 wget/uclient-fetch。' >&2
+        return 1
+    fi
+}
+
+if [ -f /etc/openwrt_release ]; then
+    echo '检测到 OpenWrt / iStoreOS：进入软路由本机模式，无需 Bash、Python、Git 或云服务器。'
+    fetch_script https://raw.githubusercontent.com/slobys/SSL-Renewal/main/openwrt_ip_ssl.sh "$DOWNLOAD_DIR/openwrt_ip_ssl.sh"
+    sh -n "$DOWNLOAD_DIR/openwrt_ip_ssl.sh"
+    TARGET_DIR=/root/.ssl-renewal/openwrt
+    mkdir -p "$TARGET_DIR"
+    chmod 700 "$TARGET_DIR"
+    cp "$DOWNLOAD_DIR/openwrt_ip_ssl.sh" "$TARGET_DIR/openwrt_ip_ssl.sh.new"
+    chmod 700 "$TARGET_DIR/openwrt_ip_ssl.sh.new"
+    mv -f "$TARGET_DIR/openwrt_ip_ssl.sh.new" "$TARGET_DIR/openwrt_ip_ssl.sh"
+    sh "$TARGET_DIR/openwrt_ip_ssl.sh" menu
+    exit 0
+fi
+
+# Existing Linux server modes remain Bash-based. Never run these package commands
+# on OpenWrt. Do not perform an unrelated system/package upgrade.
+command -v bash >/dev/null 2>&1 || { echo 'Linux 服务器模式需要 Bash，请先安装。'; exit 1; }
+if ! command -v git >/dev/null 2>&1; then
+    if [ -f /etc/os-release ]; then . /etc/os-release; OS_ID=${ID:-unknown}; else OS_ID=unknown; fi
+    case "$OS_ID" in
+        ubuntu|debian) apt-get update -y; apt-get install git -y;;
+        centos|rhel|rocky|almalinux|fedora)
+            PM=yum
+            if command -v dnf >/dev/null 2>&1; then PM=dnf; fi
+            "$PM" install git -y
+            ;;
+        *) echo '此系统请先手动安装 Git。'; exit 1;;
+    esac
+fi
+
 git clone --depth 1 --branch main https://github.com/slobys/SSL-Renewal.git "$DOWNLOAD_DIR/repo"
-for file in acme.sh acme_3.0.sh dynamic_ip_cert.sh remote_ip_ssl.sh; do
+for file in acme.sh acme_3.0.sh dynamic_ip_cert.sh remote_ip_ssl.sh openwrt_ip_ssl.sh; do
     bash -n "$DOWNLOAD_DIR/repo/$file"
 done
-for file in acme.sh acme_3.0.sh dynamic_ip_cert.sh remote_ip_ssl.sh; do
+for file in acme.sh acme_3.0.sh dynamic_ip_cert.sh remote_ip_ssl.sh openwrt_ip_ssl.sh; do
     install -m 700 "$DOWNLOAD_DIR/repo/$file" "/root/$file"
 done
-# Inherit the caller's terminal directly; no extra pseudo-terminal is needed.
+# Retain the legacy remote runner for existing installations; do not migrate,
+# disable or delete anyone's old scheduled remote jobs merely by updating scripts.
 bash /root/acme_3.0.sh
