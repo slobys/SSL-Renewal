@@ -477,6 +477,53 @@ class OpenWrtLocalTests(unittest.TestCase):
         self.assertIn('check-all',(self.p/'crontab').read_text())
         self.assert_firewall_clean()
 
+    def test_setup_confirmation_accepts_yes_case_variants(self):
+        (self.base/'v4.conf').unlink()
+        prefix='1\n1\nwan\n\ntest@example.com\n\n2\n\n'
+        # Exercise the actual setup prompt up to the dependency boundary without
+        # installing packages, modifying UCI or requesting any certificate.
+        body='ow_require() { :; }; ow_dependencies() { echo CONFIRM_ACCEPTED; exit 0; }; ow_setup'
+        interpreters=[['sh']]
+        if shutil.which('busybox'): interpreters.append(['busybox','ash'])
+        for interpreter in interpreters:
+            for answer in ('yes','YES','Yes','yEs','yeS','YEs','yES','YeS'):
+                with self.subTest(interpreter=interpreter, answer=answer):
+                    r=self.shell(body,interpreter=interpreter,input_text=prefix+answer+'\n')
+                    self.assertIn('CONFIRM_ACCEPTED',r.stdout)
+                    self.assertIn('输入 yes / YES（回车取消）',r.stdout)
+                    self.assertNotIn('已取消',r.stdout)
+        self.assertFalse(self.calls('opkg'))
+        self.assertFalse(self.calls('fake-acme-tool'))
+        self.assertFalse((self.base/'v4.conf').exists())
+
+    def test_setup_confirmation_still_cancels_on_blank_no_invalid_or_eof(self):
+        (self.base/'v4.conf').unlink()
+        prefix='1\n1\nwan\n\ntest@example.com\n\n2\n\n'
+        body='ow_require() { :; }; ow_dependencies() { echo MUST_NOT_INSTALL; exit 91; }; ow_setup'
+        for answer in ('\n','no\n','NO\n','y\n','Y\n','YESplease\n','yes no\n','1\n',''):
+            with self.subTest(answer=answer):
+                r=self.shell(body,input_text=prefix+answer)
+                self.assertNotIn('MUST_NOT_INSTALL',r.stdout)
+        self.assertFalse(self.calls('opkg'))
+        self.assertFalse(self.calls('fake-acme-tool'))
+        self.assertFalse(self.calls('uci','set'))
+        self.assertFalse((self.base/'v4.conf').exists())
+        self.assertFalse((self.p/'crontab').exists())
+
+    def test_setup_lowercase_yes_completes_uhttpd_flow(self):
+        (self.base/'v4.conf').unlink()
+        r=self.cli('setup',input_text='1\n1\nwan\n\ntest@example.com\n\n2\n\nyes\n')
+        self.assertNotIn('已取消',r.stdout)
+        self.assertTrue(self.calls('opkg'))
+        self.assertEqual(V4,(self.base/'v4.ip').read_text().strip())
+        live=self.base/'certs/v4/current'
+        config=json.loads((self.p/'uci.json').read_text())
+        self.assertEqual(str(live/'fullchain.pem'),config['uhttpd.main.cert'])
+        self.assertEqual(str(live/'privkey.pem'),config['uhttpd.main.key'])
+        self.assertTrue(self.calls('uhttpd','restart'))
+        self.assertIn('check-all',(self.p/'crontab').read_text())
+        self.assert_firewall_clean()
+
     def test_setup_apk_branch(self):
         self.command(self.bin/'apk',MOCK)
         (self.base/'v4.conf').unlink()

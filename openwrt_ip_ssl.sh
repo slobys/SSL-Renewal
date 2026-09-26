@@ -577,8 +577,11 @@ ow_setup() {
     echo '不开放 LuCI、不关闭防火墙；公网验证端口仍需运营商允许、上级 NAT 正确映射。'
     echo '验证期间该 WAN 端口的普通访问会短暂中断；IP 证书只匹配该公网 IP。'
     [ "$DEPLOY" != uhttpd ] || echo '将备份 uHTTPd 配置、修改此实例证书路径并重启 uHTTPd；内网 IP 访问不匹配此证书。'
-    ow_prompt '确认开通并安装依赖？输入 YES：' || return 0
-    [ "$ANSWER" = YES ] || { echo '已取消，未安装依赖。'; return 0; }
+    ow_prompt '确认申请并安装依赖？输入 yes / YES（回车取消）：' || return 0
+    case "$ANSWER" in
+        [Yy][Ee][Ss]) ;;
+        *) echo '已取消，未安装依赖。'; return 0;;
+    esac
     ow_dependencies
     ow_lock
     ow_client
