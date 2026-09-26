@@ -1168,16 +1168,17 @@ remote_menu() {
 
     while true; do
         clear 2>/dev/null || true
-        echo "============ 远程 IP SSL ============"
+        echo "============ 远程设备 IP 证书 ============"
+        echo "本机负责申请，证书给远端设备使用；与本机动态 IP 配置相互独立。"
         echo "1）添加远程设备"
-        echo "2）固定公网 IP"
-        echo "3）动态公网 IP"
+        echo "2）配置远端固定公网 IP"
+        echo "3）配置远端动态公网 IP"
         echo "4）立即申请/更新证书"
         echo "5）查看设备状态"
         echo "6）删除设备"
-        echo "7）返回"
-        echo "======================================"
-        read -r -p "请输入选项（1-7）： " option
+        echo "0）返回主菜单"
+        echo "=========================================="
+        read -r -p "请输入选项（0-6）： " option || return 0
 
         case "$option" in
             1)
@@ -1204,7 +1205,7 @@ remote_menu() {
                 delete_device
                 read -r -p "按回车继续..." _
                 ;;
-            7)
+            0|7) # Keep the former return key compatible.
                 return 0
                 ;;
             *)

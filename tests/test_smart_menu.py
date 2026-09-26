@@ -317,6 +317,248 @@ main
         self.assertIn('已取消', result.stdout)
         self.assertFalse((self.base / 'acme.log').exists())
 
+    def navigation(self, body='', input_text=''):
+        return self.shell('''
+require_root() { :; }
+sleep() { :; }
+DYNAMIC_DIR="$TEST_DIR/dynamic"
+DYNAMIC_RUNNER="$DYNAMIC_DIR/dynamic_ip_cert.sh"
+REMOTE_DIR="$TEST_DIR/remote"
+REMOTE_RUNNER="$REMOTE_DIR/remote_ip_ssl.sh"
+''' + body + '\nmain', input_text)
+
+    def dynamic_fixture(self, families=(4,)):
+        directory = self.base / 'dynamic'
+        directory.mkdir(exist_ok=True)
+        for family in families:
+            (directory / ('dynamic-ip-v%d.conf' % family)).write_text('''
+STATE_FILE="$TEST_DIR/dynamic/dynamic-ip-v%s.state"
+CERT_PATH="$TEST_DIR/kept.crt"
+KEY_PATH="$TEST_DIR/kept.key"
+CHALLENGE_MODE=webroot
+''' % family)
+            (directory / ('dynamic-ip-v%d.state' % family)).write_text(V4 + '\n')
+            (directory / ('dynamic-ip-v%d.log' % family)).write_text('old-log\n')
+        runner = directory / 'dynamic_ip_cert.sh'
+        runner.write_text('#!/bin/bash\nprintf "CHECKED=%s\\n" "$1"\n')
+        runner.chmod(0o700)
+        return directory
+
+    def test_main_exit_and_eof_do_not_deploy(self):
+        for text in ('6\n', ''):
+            with self.subTest(text=text):
+                result = self.navigation(input_text=text)
+                self.assertIn('4）远程设备 IP 证书', result.stdout)
+                self.assertNotIn('4）本机动态 IP SSL 管理', result.stdout)
+                self.assertFalse((self.base / 'curl.log').exists())
+
+    def test_dynamic_submenu_returns_without_falling_into_issuance(self):
+        result = self.navigation(input_text='3\n0\n6\n')
+        self.assertIn('1）开通 / 重新配置', result.stdout)
+        self.assertIn('IPv4：未配置；IPv6：未配置', result.stdout)
+        self.assertEqual(2, result.stdout.count('SSL证书管理菜单'))
+        self.assertFalse((self.base / 'curl.log').exists())
+
+    def test_dynamic_navigation_handles_invalid_input_and_eof(self):
+        for text in ('3\n', '3\nwrong\n0\n6\n', 'wrong\n6\n'):
+            with self.subTest(text=text):
+                self.navigation(input_text=text)
+        self.assertFalse((self.base / 'curl.log').exists())
+
+    def test_empty_dynamic_status_does_not_require_issuance(self):
+        result = self.navigation(input_text='3\n2\n\n0\n6\n')
+        self.assertIn('IPv4: 未配置', result.stdout)
+        self.assertIn('IPv6: 未配置', result.stdout)
+        self.assertFalse((self.base / 'acme.log').exists())
+
+    def test_empty_dynamic_check_and_disable_return_to_menu(self):
+        for action in ('3', '4'):
+            with self.subTest(action=action):
+                result = self.navigation(input_text='3\n' + action + '\n\n0\n6\n')
+                self.assertIn('尚未开通本机动态 IP 证书', result.stdout)
+                self.assertIn('已退出', result.stdout)
+        self.assertFalse((self.base / 'acme.log').exists())
+
+    def test_dynamic_setup_cancel_before_any_effects(self):
+        for text in ('0\n', 'wrong\n0\n', ''):
+            with self.subTest(text=text):
+                result = self.shell('DYNAMIC_DIR="$TEST_DIR/dynamic"; '
+                                    'setup_dynamic_ip_certificate; echo CANCEL_OK', text)
+                self.assertIn('CANCEL_OK', result.stdout)
+                self.assertFalse((self.base / 'dynamic').exists())
+
+    def test_existing_dynamic_config_requires_explicit_reconfigure(self):
+        directory = self.dynamic_fixture()
+        config = directory / 'dynamic-ip-v4.conf'
+        old = config.read_bytes()
+        result = self.navigation(input_text='3\n1\n1\n\n\n0\n6\n')
+        self.assertIn('保留原配置', result.stdout)
+        self.assertEqual(old, config.read_bytes())
+        self.assertFalse((self.base / 'curl.log').exists())
+
+    def test_setup_success_returns_to_combined_submenu(self):
+        # Exercise the real setup and config writer, but never issue/install certs.
+        body = '''
+install_dependencies() { DEPENDENCIES_READY=1; }
+configure_firewall() { :; }
+ensure_acme() { :; }
+register_account() { :; }
+install_dynamic_runner() {
+    mkdir -p "$DYNAMIC_DIR"
+    printf '#!/bin/bash\n. "$1"\nprintf "45.77.170.45\\n" > "$STATE_FILE"\n' > "$DYNAMIC_RUNNER"
+    chmod 700 "$DYNAMIC_RUNNER"
+}
+install_dynamic_cron() { echo "DYNAMIC_CRON=$2"; }
+'''
+        result = self.navigation(body, '3\n1\n1\ntest@example.com\n1\n\n3\n\n0\n6\n')
+        self.assertIn('DYNAMIC_CRON=4', result.stdout)
+        self.assertIn('IPv4：已配置；IPv6：未配置', result.stdout)
+        self.assertIn('已退出', result.stdout)
+        self.assertTrue((self.base / 'dynamic/dynamic-ip-v4.conf').exists())
+        self.assertFalse((self.base / 'acme.log').exists())
+
+    def test_failed_action_does_not_disable_errexit_or_kill_menu(self):
+        body = '''
+setup_dynamic_ip_certificate() {
+    echo ACTION_STARTED
+    false
+    echo INVALID_SUCCESS
+}
+'''
+        result = self.navigation(body, '3\n1\n\n0\n6\n')
+        self.assertIn('ACTION_STARTED', result.stdout)
+        self.assertNotIn('INVALID_SUCCESS', result.stdout)
+        self.assertIn('退出码 1', result.stdout)
+        self.assertIn('已退出', result.stdout)
+
+    def test_explicit_exit_is_isolated_from_navigation(self):
+        result = self.navigation('setup_dynamic_ip_certificate() { exit 23; }',
+                                 '3\n1\n\n0\n6\n')
+        self.assertIn('退出码 23', result.stdout)
+        self.assertIn('已退出', result.stdout)
+
+    def test_dynamic_family_selection_cancel_default_and_unconfigured(self):
+        self.dynamic_fixture((6,))
+        body = 'DYNAMIC_DIR="$TEST_DIR/dynamic"; choose_configured_dynamic_family; '
+        result = self.shell(body + 'echo "FAMILY=$SELECTED_DYNAMIC_FAMILY"', '\n')
+        self.assertIn('FAMILY=6', result.stdout)
+        result = self.shell(body + 'echo "FAMILY=$SELECTED_DYNAMIC_FAMILY"', '1\n2\n')
+        self.assertIn('该地址类型尚未配置', result.stdout)
+        self.assertIn('FAMILY=6', result.stdout)
+        self.shell('DYNAMIC_DIR="$TEST_DIR/dynamic"; SELECTED_DYNAMIC_FAMILY=4; '
+                   'if choose_configured_dynamic_family; then exit 90; fi; '
+                   'test -z "$SELECTED_DYNAMIC_FAMILY"', '0\n')
+
+    def test_dynamic_check_reuses_existing_runner_and_config(self):
+        directory = self.dynamic_fixture((4, 6))
+        before = {p.name: p.read_bytes() for p in directory.iterdir()}
+        result = self.navigation(input_text='3\n3\n2\n\n0\n6\n')
+        self.assertIn('CHECKED=' + str(directory / 'dynamic-ip-v6.conf'), result.stdout)
+        self.assertEqual(before, {p.name: p.read_bytes() for p in directory.iterdir()})
+        self.assertFalse((self.base / 'acme.log').exists())
+
+    def test_failed_dynamic_check_allows_more_actions(self):
+        directory = self.dynamic_fixture()
+        (directory / 'dynamic_ip_cert.sh').write_text('#!/bin/bash\nexit 17\n')
+        result = self.navigation(input_text='3\n3\n1\n\n0\n6\n')
+        self.assertIn('退出码 17', result.stdout)
+        self.assertIn('已退出', result.stdout)
+
+    def test_dynamic_disable_cancel_preserves_everything(self):
+        directory = self.dynamic_fixture()
+        before = {p.name: p.read_bytes() for p in directory.iterdir()}
+        result = self.navigation(input_text='3\n4\n1\nno\n\n0\n6\n')
+        self.assertIn('已取消，原配置和任务保持不变', result.stdout)
+        self.assertEqual(before, {p.name: p.read_bytes() for p in directory.iterdir()})
+
+    def test_dynamic_disable_keeps_certs_remote_config_and_other_cron(self):
+        directory = self.dynamic_fixture((4, 6))
+        (self.base / 'kept.crt').write_text('certificate')
+        (self.base / 'kept.key').write_text('private-key')
+        remote = self.base / 'remote'
+        remote.mkdir()
+        (remote / 'device.conf').write_text('remote-device')
+        cron = self.base / 'crontab'
+        v4 = '*/5 * * * * %s %s\n' % (directory / 'dynamic_ip_cert.sh', directory / 'dynamic-ip-v4.conf')
+        v6 = '*/5 * * * * %s %s\n' % (directory / 'dynamic_ip_cert.sh', directory / 'dynamic-ip-v6.conf')
+        other = '0 0 * * * /root/.acme.sh/acme.sh --cron\n17 */6 * * * /remote cron home\n'
+        cron.write_text(v4 + v6 + other)
+        self.write_command('crontab', '''#!/bin/bash
+case "$1" in
+    -l) cat "$TEST_DIR/crontab" ;;
+    -) cat > "$TEST_DIR/crontab.new"; mv "$TEST_DIR/crontab.new" "$TEST_DIR/crontab" ;;
+    *) exit 99 ;;
+esac
+''')
+        result = self.navigation(input_text='3\n4\n1\nSTOP\n\n0\n6\n')
+        self.assertIn('只移除 IP 变化检测', result.stdout)
+        self.assertEqual(v6 + other, cron.read_text())
+        self.assertFalse((directory / 'dynamic-ip-v4.conf').exists())
+        self.assertTrue((directory / 'dynamic-ip-v6.conf').exists())
+        self.assertTrue((directory / 'dynamic_ip_cert.sh').exists())
+        self.assertEqual('certificate', (self.base / 'kept.crt').read_text())
+        self.assertEqual('private-key', (self.base / 'kept.key').read_text())
+        self.assertEqual('remote-device', (remote / 'device.conf').read_text())
+
+    def test_new_remote_entry_is_independent_of_local_dynamic_setup(self):
+        body = '''
+setup_dynamic_ip_certificate() { echo WRONG_LOCAL_SETUP; exit 90; }
+manage_dynamic_ip() { echo WRONG_LOCAL_MENU; exit 91; }
+manage_remote_ip_ssl() { CERT_KIND=ip; echo REMOTE_ONLY; }
+'''
+        result = self.navigation(body, '4\n6\n')
+        self.assertIn('REMOTE_ONLY', result.stdout)
+        self.assertNotIn('WRONG_LOCAL', result.stdout)
+        self.assertFalse((self.base / 'dynamic').exists())
+        self.assertFalse((self.base / 'curl.log').exists())
+        self.assertEqual(2, result.stdout.count('SSL证书管理菜单'))
+
+    def test_remote_action_error_returns_to_main(self):
+        result = self.navigation('manage_remote_ip_ssl() { exit 27; }', '4\n\n6\n')
+        self.assertIn('退出码 27', result.stdout)
+        self.assertIn('已退出', result.stdout)
+
+    def test_remote_submenu_return_keys_and_eof(self):
+        # Extract only the real UI function; do not source remote's top-level
+        # directory/SSH initialization or execute any network/ACME operations.
+        source = (ROOT / 'remote_ip_ssl.sh').read_text()
+        menu = source.split('remote_menu() {', 1)[1].split('\ncron_main()', 1)[0]
+        body = ('ensure_runner_installed() { :; }; ensure_local_ssh_key() { :; };\n'
+                + 'remote_menu() {' + menu + '\nremote_menu; echo RETURNED')
+        for text in ('0\n', '7\n', ''):
+            with self.subTest(text=text):
+                result = self.shell(body, text)
+                self.assertIn('远程设备 IP 证书', result.stdout)
+                self.assertIn('配置远端动态公网 IP', result.stdout)
+                self.assertIn('RETURNED', result.stdout)
+
+    def test_update_default_cancel_and_error(self):
+        result = self.navigation('update_script() { echo UPDATE_STARTED; exit 21; }',
+                                 '5\n\n5\ny\n\n6\n')
+        self.assertEqual(1, result.stdout.count('UPDATE_STARTED'))
+        self.assertIn('已取消更新', result.stdout)
+        self.assertIn('退出码 21', result.stdout)
+        self.assertIn('已退出', result.stdout)
+        self.assertFalse((self.base / 'curl.log').exists())
+
+    def test_successful_update_returns_without_reentering_old_menu(self):
+        result = self.navigation('update_script() { echo UPDATED; }', '5\ny\n')
+        self.assertIn('UPDATED', result.stdout)
+        self.assertEqual(1, result.stdout.count('SSL证书管理菜单'))
+
+    def test_manual_ip_hint_uses_new_remote_entry(self):
+        result = self.shell('select_public_ip', '3\n' + V4 + '\n')
+        self.assertIn('主菜单 4 的远程设备模式', result.stdout)
+        self.assertNotIn('主菜单 5 的远程模式', result.stdout)
+
+    def test_readme_matches_menu_and_stays_concise(self):
+        text = (ROOT / 'README.md').read_text()
+        self.assertIn('| 3）本机动态 IP 证书 |', text)
+        self.assertIn('| 4）远程设备 IP 证书 |', text)
+        self.assertIn('进入 **4 → 添加远程设备', text)
+        self.assertNotIn('| 4）本机动态 IP 管理 |', text)
+        self.assertLessEqual(len(text.splitlines()), 80)
+
     def test_install_failure_is_not_reported_as_success(self):
         result = self.shell('ACME_BIN="$TEST_DIR/bin/fake-acme"; IDENTIFIER=45.77.170.45; '
                             'issue_static_certificate; echo FALSE_SUCCESS',

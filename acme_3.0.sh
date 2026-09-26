@@ -196,7 +196,7 @@ select_public_ip() {
             echo "✅ 已选择 IPv${IP_VERSION}：$IDENTIFIER（$IP_SELECTION_MODE）"
             if [ "$IP_SELECTION_MODE" = "手动输入" ]; then
                 echo "ℹ️ 手动填写不会转移验证地点；目标 IP 的验证请求必须能到达本机。"
-                echo "   云服务器替家中软路由申请，请使用主菜单 5 的远程模式。"
+                echo "   云服务器替家中软路由申请，请使用主菜单 4 的远程设备模式。"
             fi
             return 0
         else
@@ -615,19 +615,34 @@ setup_dynamic_ip_certificate() {
     CERT_KIND="dynamic_ip"
     CA_SERVER="letsencrypt"
 
+    local confirm
     echo
-    echo "请选择要自动跟踪的公网 IP 类型："
-    echo "1）IPv4"
-    echo "2）IPv6"
-    read -r -p "输入选项（1-2）： " FAMILY_OPTION
-    case "$FAMILY_OPTION" in
-        1) IP_VERSION="4" ;;
-        2) IP_VERSION="6" ;;
-        *) die "无效的 IP 类型。" ;;
-    esac
+    echo "本机模式：跟踪运行脚本这台机器的公网出口，不会检测家里的远程设备。"
+    while true; do
+        echo "1）IPv4"
+        echo "2）IPv6"
+        echo "0）返回本机动态 IP 菜单"
+        read -r -p "请选择地址类型： " FAMILY_OPTION || return 0
+        case "$FAMILY_OPTION" in
+            1) IP_VERSION="4"; break ;;
+            2) IP_VERSION="6"; break ;;
+            0) return 0 ;;
+            *) echo "❌ 无效选项，请重新选择。" ;;
+        esac
+    done
 
-    read -r -p "请输入电子邮件地址: " EMAIL
-    validate_email "$EMAIL" || die "电子邮件地址格式不正确。"
+    if [ -f "$DYNAMIC_DIR/dynamic-ip-v${IP_VERSION}.conf" ]; then
+        echo "IPv${IP_VERSION} 已有配置；查看或立即检查无需重新开通。"
+        read -r -p "重新配置这一地址类型？[y/N]： " confirm || return 0
+        case "$confirm" in y|Y|yes|YES) ;; *) echo "保留原配置。"; return 0 ;; esac
+    fi
+
+    while true; do
+        read -r -p "请输入电子邮件地址（留空返回）： " EMAIL || return 0
+        [ -n "$EMAIL" ] || return 0
+        validate_email "$EMAIL" && break
+        echo "❌ 电子邮件地址格式不正确，请重新输入。"
+    done
 
     select_ip_challenge 1 || { echo "已取消。"; return 0; }
 
@@ -736,60 +751,128 @@ remove_dynamic_monitor() {
     rm -f "$config_file" "$state_file" "$log_file"
     echo "✅ 已删除 IPv${family} 动态 IP 自动检测配置。"
     echo "ℹ️ 已签发的 /root/dynamic-ip-v${family}.crt 和 .key 保留，不会删除。"
+    echo "ℹ️ 此操作只移除 IP 变化检测；acme.sh 原有到期续期记录不受影响。"
 
     if [ ! -f "$DYNAMIC_DIR/dynamic-ip-v4.conf" ] && [ ! -f "$DYNAMIC_DIR/dynamic-ip-v6.conf" ]; then
         rm -f "$DYNAMIC_RUNNER"
     fi
 }
 
-manage_dynamic_ip() {
-    while true; do
-        clear 2>/dev/null || true
-        echo "============== 动态 IP SSL 管理 =============="
-        echo "1）查看状态"
-        echo "2）立即检查/更新 IPv4"
-        echo "3）立即检查/更新 IPv6"
-        echo "4）删除 IPv4 自动检测"
-        echo "5）删除 IPv6 自动检测"
-        echo "6）返回主菜单"
-        echo "=============================================="
-        read -r -p "请输入选项（1-6）： " DYNAMIC_OPTION
+# Run each stateful operation in a child shell: its exit/set -e must not
+# terminate navigation or leak local/remote selection into the next action.
+# Do not put the child in an if/|| condition: that would disable its errexit.
+run_menu_action() {
+    set +e
+    ( set -e; "$@" )
+    MENU_ACTION_STATUS=$?
+    set -e
+    if [ "$MENU_ACTION_STATUS" -ne 0 ]; then
+        echo "❌ 本次操作未完成（退出码 $MENU_ACTION_STATUS），请查看上方提示。"
+    fi
+    return 0
+}
 
-        case "$DYNAMIC_OPTION" in
+pause_menu() {
+    local answer
+    read -r -p "按回车返回菜单..." answer
+}
+
+choose_configured_dynamic_family() {
+    local choice default v4="未配置" v6="未配置"
+    SELECTED_DYNAMIC_FAMILY=""
+    [ ! -f "$DYNAMIC_DIR/dynamic-ip-v4.conf" ] || v4="已配置"
+    [ ! -f "$DYNAMIC_DIR/dynamic-ip-v6.conf" ] || v6="已配置"
+    if [ "$v4" = "未配置" ] && [ "$v6" = "未配置" ]; then
+        echo "尚未开通本机动态 IP 证书，请先选择本子菜单的 1。"
+        return 1
+    fi
+    default=1
+    [ "$v4" = "已配置" ] || default=2
+    while true; do
+        echo "1）IPv4（$v4）"
+        echo "2）IPv6（$v6）"
+        echo "0）取消"
+        read -r -p "请选择 [默认 $default]： " choice || return 1
+        case "${choice:-$default}" in
             1)
-                echo
-                show_dynamic_status_family 4
-                echo
-                show_dynamic_status_family 6
-                echo
-                read -r -p "按回车继续..." _
+                if [ "$v4" = "已配置" ]; then SELECTED_DYNAMIC_FAMILY=4; return 0; fi
                 ;;
             2)
-                force_dynamic_check 4
-                read -r -p "按回车继续..." _
+                if [ "$v6" = "已配置" ]; then SELECTED_DYNAMIC_FAMILY=6; return 0; fi
                 ;;
-            3)
-                force_dynamic_check 6
-                read -r -p "按回车继续..." _
-                ;;
-            4)
-                remove_dynamic_monitor 4
-                read -r -p "按回车继续..." _
-                ;;
-            5)
-                remove_dynamic_monitor 6
-                read -r -p "按回车继续..." _
-                ;;
-            6)
-                return 0
-                ;;
-            *)
-                echo "❌ 无效选项。"
-                sleep 1
-                ;;
+            0) return 1 ;;
+            *) echo "❌ 无效选项。"; continue ;;
         esac
+        echo "该地址类型尚未配置，请重新选择。"
     done
 }
+
+check_dynamic_from_menu() {
+    choose_configured_dynamic_family || return 0
+    echo "立即检查本机 IP 变化；不是强制续签，IP 未变时不会重复申请。"
+    force_dynamic_check "$SELECTED_DYNAMIC_FAMILY"
+}
+
+disable_dynamic_from_menu() {
+    local confirm
+    choose_configured_dynamic_family || return 0
+    echo "将停用本机 IPv${SELECTED_DYNAMIC_FAMILY} 的 IP 变化检测并移除对应配置。"
+    echo "已有证书、私钥以及 acme.sh 原有到期续期记录保留；不会影响远程设备。"
+    read -r -p "确认停用？输入 STOP： " confirm || return 0
+    if [ "$confirm" != "STOP" ]; then
+        echo "已取消，原配置和任务保持不变。"
+        return 0
+    fi
+    remove_dynamic_monitor "$SELECTED_DYNAMIC_FAMILY"
+}
+
+show_all_dynamic_status() {
+    show_dynamic_status_family 4
+    echo
+    show_dynamic_status_family 6
+}
+
+manage_dynamic_ip() {
+    local choice v4 v6
+    while true; do
+        v4="未配置"; v6="未配置"
+        [ ! -f "$DYNAMIC_DIR/dynamic-ip-v4.conf" ] || v4="已配置"
+        [ ! -f "$DYNAMIC_DIR/dynamic-ip-v6.conf" ] || v6="已配置"
+        clear 2>/dev/null || true
+        echo "============ 本机动态 IP 证书 ============"
+        echo "适用：脚本直接运行在动态公网网络内；云服务器固定 IP 通常选主菜单 2。"
+        echo "IPv4：$v4；IPv6：$v6"
+        echo "1）开通 / 重新配置"
+        echo "2）查看状态"
+        echo "3）立即检查 IP 变化"
+        echo "4）停用 IP 变化检测（保留证书）"
+        echo "0）返回主菜单"
+        echo "=========================================="
+        read -r -p "请选择： " choice || return 0
+        case "$choice" in
+            1) run_menu_action setup_dynamic_ip_certificate ;;
+            2) run_menu_action show_all_dynamic_status ;;
+            3) run_menu_action check_dynamic_from_menu ;;
+            4) run_menu_action disable_dynamic_from_menu ;;
+            0) return 0 ;;
+            *) echo "❌ 无效选项，请重新选择。"; continue ;;
+        esac
+        pause_menu || return 0
+    done
+}
+
+update_script() (
+    # Syntax-check the download before running; never delete certificate/config dirs.
+    set -e
+    local downloaded
+    downloaded="$(mktemp /tmp/ssl-renewal-update.XXXXXX)"
+    trap 'rm -f -- "$downloaded"' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    curl -fsSL https://raw.githubusercontent.com/slobys/SSL-Renewal/main/acme.sh -o "$downloaded"
+    bash -n "$downloaded"
+    bash "$downloaded"
+)
 
 manage_remote_ip_ssl() {
     detect_os
@@ -814,18 +897,20 @@ manage_remote_ip_ssl() {
 main() {
 require_root
 
+local update_confirm
 while true; do
+    CERT_KIND=""
     clear 2>/dev/null || true
     echo "============== SSL证书管理菜单 =============="
-    echo "1）申请域名 SSL 证书"
-    echo "2）申请固定公网 IP SSL 证书"
-    echo "3）动态公网 IP SSL（本机IP变化自动重签）"
-    echo "4）本机动态 IP SSL 管理"
-    echo "5）远程 IP SSL（OpenWrt/远程设备）"
-    echo "6）重置环境（重新部署脚本）"
-    echo "7）退出"
+    echo "1）域名证书（本机申请）"
+    echo "2）本机固定 IP 证书（云服务器常用）"
+    echo "3）本机动态 IP 证书（开通 / 管理）"
+    echo "4）远程设备 IP 证书（给其他设备申请）"
+    echo "5）更新 / 重新部署脚本"
+    echo "6）退出"
     echo "============================================"
-    read -r -p "请输入选项（1-7）： " MAIN_OPTION
+    echo "提示：给当前云服务器用选 2；替家中软路由申请选 4。"
+    read -r -p "请输入选项（1-6）： " MAIN_OPTION || return 0
 
     case "$MAIN_OPTION" in
         1)
@@ -837,26 +922,28 @@ while true; do
             break
             ;;
         3)
-            setup_dynamic_ip_certificate
-            exit 0
-            ;;
-        4)
             manage_dynamic_ip
             ;;
+        4)
+            echo "远程模式：本机负责申请，证书部署到另一台设备；无需先开通本机动态模式。"
+            run_menu_action manage_remote_ip_ssl
+            if [ "$MENU_ACTION_STATUS" -ne 0 ]; then pause_menu || return 0; fi
+            ;;
         5)
-            manage_remote_ip_ssl
+            echo "只更新运行脚本，保留现有证书、设备配置和自动任务。"
+            read -r -p "更新并打开新版菜单？[y/N]： " update_confirm || return 0
+            case "$update_confirm" in
+                y|Y|yes|YES)
+                    run_menu_action update_script
+                    [ "$MENU_ACTION_STATUS" -ne 0 ] || return 0
+                    pause_menu || return 0
+                    ;;
+                *) echo "已取消更新。" ;;
+            esac
             ;;
         6)
-            echo "⚠️ 正在重置脚本部署环境..."
-            rm -rf /tmp/acme
-            echo "📦 正在重新执行 acme.sh ..."
-            sleep 1
-            bash <(curl -fsSL https://raw.githubusercontent.com/slobys/SSL-Renewal/main/acme.sh)
-            exit 0
-            ;;
-        7)
             echo "👋 已退出。"
-            exit 0
+            return 0
             ;;
         *)
             echo "❌ 无效选项，请重新输入。"
