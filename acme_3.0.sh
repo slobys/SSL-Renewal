@@ -22,6 +22,15 @@ WEBROOT_PATH=""
 RELOAD_CMD=""
 KEY_PATH=""
 CERT_PATH=""
+DEPENDENCIES_READY=0
+DETECTED_IPV4=""
+DETECTED_IPV6=""
+IP_SELECTION_MODE=""
+PORT80_STATE="unknown"
+PORT443_STATE="unknown"
+PORT80_LISTENERS=""
+PORT443_LISTENERS=""
+RECOMMENDED_CHALLENGE=""
 
 die() {
     echo "❌ $*"
@@ -38,29 +47,221 @@ validate_email() {
     [[ "$1" =~ ^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$ ]]
 }
 
-validate_public_ip() {
-    local result
-    if ! result="$(python3 - "$1" <<'PY'
+# One validator is shared by manual input and discovery responses.
+ip_tool() {
+    python3 - "$@" <<'PY'
+import concurrent.futures
 import ipaddress
+import subprocess
 import sys
 
-try:
-    ip = ipaddress.ip_address(sys.argv[1])
-except ValueError:
+
+def address(raw):
+    raw = raw.strip()
+    if raw.startswith('[') and raw.endswith(']') and ':' in raw:
+        raw = raw[1:-1]
+    if '%' in raw:
+        raise ValueError('IPv6 scope identifiers are not supported')
+    ip = ipaddress.ip_address(raw)
+    if (not ip.is_global or ip.is_multicast or ip.is_reserved
+            or ip.is_loopback or ip.is_link_local or ip.is_unspecified
+            or getattr(ip, 'ipv4_mapped', None) is not None):
+        raise PermissionError('Not a public unicast address')
+    return ip
+
+
+def discover(family):
+    hosts = ('4.ipw.cn', 'api4.ipify.org', 'ipv4.icanhazip.com') if family == 4 else (
+        '6.ipw.cn', 'api6.ipify.org', 'ipv6.icanhazip.com')
+    for host in hosts:
+        try:
+            # -q must be first: do not let .curlrc or proxy variables change
+            # the observed egress address. Router-level proxies may still apply.
+            result = subprocess.run(
+                ['curl', '-q', '--noproxy', '*', '--proxy', '',
+                 '--proto', '=https', '-{}'.format(family), '-fsS',
+                 '--connect-timeout', '3', '--max-time', '5',
+                 '--max-filesize', '1024', 'https://' + host],
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL, timeout=6, check=False)
+            if result.returncode != 0 or len(result.stdout) > 1024:
+                continue
+            ip = address(result.stdout.decode('ascii'))
+            if ip.version == family:
+                return '{}|{}|{}'.format(family, ip.compressed, host)
+        except (OSError, ValueError, PermissionError, subprocess.TimeoutExpired):
+            continue
+    return '{}||'.format(family)
+
+
+if sys.argv[1] == 'validate':
+    try:
+        ip = address(sys.argv[2])
+    except PermissionError:
+        sys.exit(2)
+    except ValueError:
+        sys.exit(1)
+    print('{}|{}'.format(ip.version, ip.compressed))
+elif sys.argv[1] == 'discover':
+    # A missing IPv6 route does not hold up the IPv4 probe.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        for line in pool.map(discover, (4, 6)):
+            print(line)
+else:
     sys.exit(1)
-
-print(f"{ip.version}|{ip.compressed}|{1 if ip.is_global else 0}")
 PY
-)"; then
-        return 1
-    fi
+}
 
-    local is_global
-    IFS='|' read -r IP_VERSION IP_CANONICAL is_global <<< "$result"
-    if [ "$is_global" != "1" ]; then
-        return 2
+validate_public_ip() {
+    local result rc
+    IP_VERSION=""
+    IP_CANONICAL=""
+    if result="$(ip_tool validate "$1")"; then
+        IFS='|' read -r IP_VERSION IP_CANONICAL <<< "$result"
+        return 0
+    else
+        rc=$?
+        return "$rc"
     fi
-    return 0
+}
+
+ensure_ip_selection_tools() {
+    if ! command -v python3 >/dev/null 2>&1 ||
+       ! command -v curl >/dev/null 2>&1 ||
+       ! command -v ss >/dev/null 2>&1; then
+        detect_os
+        install_dependencies
+    fi
+}
+
+detect_public_ips() {
+    local results family address source
+    DETECTED_IPV4=""
+    DETECTED_IPV6=""
+    echo "🔍 正在并行检测公网 IPv4 / IPv6（检测失败时可手动输入）..."
+    results="$(ip_tool discover)" || results=""
+    while IFS='|' read -r family address source; do
+        case "$family" in
+            4) DETECTED_IPV4="$address" ;;
+            6) DETECTED_IPV6="$address" ;;
+        esac
+        if [ -n "$address" ]; then
+            printf '  IPv%s：%s（来源：%s）\n' "$family" "$address" "$source"
+        fi
+    done <<< "$results"
+    [ -n "$DETECTED_IPV4" ] || echo "  IPv4：未检测到（不等于没有公网 IPv4）"
+    [ -n "$DETECTED_IPV6" ] || echo "  IPv6：未检测到（可手动填写或重新检测）"
+    echo "ℹ️ 检测结果是出口地址，不证明该 IP 属于本机或支持公网入站。"
+    echo "ℹ️ CGNAT、透明代理、多出口网络可能影响结果，请核对云控制台/路由器 WAN 地址。"
+}
+
+select_public_ip() {
+    ensure_ip_selection_tools
+    detect_public_ips
+    local choice default candidate rc
+    while true; do
+        default=3
+        if [ -n "$DETECTED_IPV4" ]; then
+            default=1
+        elif [ -n "$DETECTED_IPV6" ]; then
+            default=2
+        fi
+        echo
+        echo "============== 公网 IP 选择 =============="
+        echo "1）使用检测到的 IPv4：${DETECTED_IPV4:-不可选}"
+        echo "2）使用检测到的 IPv6：${DETECTED_IPV6:-不可选}"
+        echo "3）手动输入公网 IP"
+        echo "4）重新检测"
+        echo "0）取消本次申请"
+        read -r -p "请选择 [默认 $default]： " choice || return 1
+        choice="${choice:-$default}"
+        IP_SELECTION_MODE="自动检测"
+        case "$choice" in
+            1) candidate="$DETECTED_IPV4" ;;
+            2) candidate="$DETECTED_IPV6" ;;
+            3)
+                IP_SELECTION_MODE="手动输入"
+                read -r -p "请输入公网 IPv4 / IPv6（仅地址，不带协议、端口或网段）： " candidate || return 1
+                ;;
+            4) detect_public_ips; continue ;;
+            0) return 1 ;;
+            *) echo "❌ 无效选项，请重新选择。"; continue ;;
+        esac
+        if [ -z "$candidate" ]; then
+            echo "⚠️ 当前没有可用地址，请手动输入或重新检测。"
+            continue
+        fi
+        if validate_public_ip "$candidate"; then
+            IDENTIFIER="$IP_CANONICAL"
+            echo "✅ 已选择 IPv${IP_VERSION}：$IDENTIFIER（$IP_SELECTION_MODE）"
+            if [ "$IP_SELECTION_MODE" = "手动输入" ]; then
+                echo "ℹ️ 手动填写不会转移验证地点；目标 IP 的验证请求必须能到达本机。"
+                echo "   云服务器替家中软路由申请，请使用主菜单 5 的远程模式。"
+            fi
+            return 0
+        else
+            rc=$?
+            if [ "$rc" -eq 2 ]; then
+                echo "❌ 不能使用私网、CGNAT、回环、保留或组播地址，请重新输入。"
+            else
+                echo "❌ IP 格式无效，请只填写地址；IPv6 可以带一对方括号。"
+            fi
+        fi
+    done
+}
+
+refresh_port_status() {
+    local listeners
+    PORT80_STATE="unknown"
+    PORT443_STATE="unknown"
+    PORT80_LISTENERS=""
+    PORT443_LISTENERS=""
+    if ! command -v ss >/dev/null 2>&1; then
+        return 0
+    fi
+    if ! listeners="$(ss -ltnpH 2>/dev/null)"; then
+        if ! listeners="$(ss -ltnH 2>/dev/null)"; then
+            return 0
+        fi
+    fi
+    # Match the LOCAL endpoint only; :8080 and peer endpoints are not :80.
+    PORT80_LISTENERS="$(printf '%s\n' "$listeners" | awk '$4 ~ /:80$/ { print }')"
+    PORT443_LISTENERS="$(printf '%s\n' "$listeners" | awk '$4 ~ /:443$/ { print }')"
+    PORT80_STATE="free"
+    PORT443_STATE="free"
+    [ -z "$PORT80_LISTENERS" ] || PORT80_STATE="busy"
+    [ -z "$PORT443_LISTENERS" ] || PORT443_STATE="busy"
+}
+
+show_port_status() {
+    local port state lines
+    for port in 80 443; do
+        if [ "$port" = "80" ]; then
+            state="$PORT80_STATE"; lines="$PORT80_LISTENERS"
+        else
+            state="$PORT443_STATE"; lines="$PORT443_LISTENERS"
+        fi
+        case "$state" in
+            free) echo "  TCP $port：本机未发现监听（公网可达性尚未验证）" ;;
+            busy)
+                echo "  TCP $port：已被占用"
+                printf '%s\n' "$lines" | tr -d '\000-\010\013-\037\177' | sed -n '1,4s/^/    /p'
+                ;;
+            *) echo "  TCP $port：无法确定（不会当作空闲）" ;;
+        esac
+    done
+}
+
+recommend_challenge() {
+    RECOMMENDED_CHALLENGE=""
+    if [ "$PORT80_STATE" = "free" ]; then
+        RECOMMENDED_CHALLENGE=1
+    elif [ "$PORT80_STATE" = "busy" ] &&
+         printf '%s\n' "$PORT80_LISTENERS" | grep -Ei '(nginx|apache2|httpd|uhttpd)' >/dev/null; then
+        RECOMMENDED_CHALLENGE=2
+    elif [ "$PORT80_STATE" = "busy" ] && [ "$PORT443_STATE" = "free" ]; then
+        RECOMMENDED_CHALLENGE=3
+    fi
 }
 
 detect_os() {
@@ -74,6 +275,7 @@ detect_os() {
 }
 
 install_dependencies() {
+    [ "$DEPENDENCIES_READY" -eq 0 ] || return 0
     echo "📦 正在检查并安装依赖..."
 
     case "$OS" in
@@ -93,21 +295,29 @@ install_dependencies() {
             die "暂不支持的操作系统：$OS"
             ;;
     esac
+    DEPENDENCIES_READY=1
 }
 
 select_firewall_action() {
-    echo
-    echo "验证需要公网可访问 TCP ${VALIDATION_PORT} 端口。"
-    echo "请选择防火墙处理方式："
-    echo "1）关闭系统防火墙"
-    echo "2）自动放行 TCP ${VALIDATION_PORT}"
-    echo "3）不修改防火墙（已自行放行/使用云安全组/路由器端口映射）"
-    read -r -p "输入选项（1-3）： " FIREWALL_OPTION
-
-    case "$FIREWALL_OPTION" in
-        1|2|3) ;;
-        *) die "无效的防火墙选项。" ;;
-    esac
+    local confirm
+    while true; do
+        echo
+        echo "验证需要公网可访问 TCP ${VALIDATION_PORT}，续期时也需要。"
+        echo "1）关闭系统防火墙【不推荐，需再次确认】"
+        echo "2）仅放行 TCP ${VALIDATION_PORT}（不自动开启防火墙）"
+        echo "3）不修改防火墙【默认】（云安全组/NAT仍需自行检查）"
+        read -r -p "请选择 [默认 3]： " FIREWALL_OPTION || die "输入已结束，未修改防火墙。"
+        FIREWALL_OPTION="${FIREWALL_OPTION:-3}"
+        case "$FIREWALL_OPTION" in
+            1)
+                read -r -p "关闭防火墙会扩大暴露面，输入 CLOSE 确认： " confirm || die "已取消。"
+                [ "$confirm" = "CLOSE" ] && return 0
+                echo "未确认，返回选择。"
+                ;;
+            2|3) return 0 ;;
+            *) echo "❌ 无效选项，请重新选择。" ;;
+        esac
+    done
 }
 
 configure_firewall() {
@@ -141,38 +351,78 @@ configure_firewall() {
 }
 
 select_ip_challenge() {
-    local dynamic_mode="${1:-0}"
+    local dynamic_mode="${1:-0}" selected_state
+    ensure_ip_selection_tools
+    while true; do
+        refresh_port_status
+        recommend_challenge
+        echo
+        echo "============== 验证环境 =============="
+        show_port_status
+        echo "1）HTTP-01 临时服务（80端口，需保持空闲）"
+        echo "2）HTTP-01 网站目录（80端口，复用已有网站，不停止服务）"
+        echo "3）TLS-ALPN-01 临时服务（443端口，80不可用时考虑）"
+        echo "4）重新检测端口"
+        echo "0）取消本次申请"
+        case "$RECOMMENDED_CHALLENGE" in
+            1) echo "⭐ 建议 1：本机 80 未发现监听；仍需确认公网入站。" ;;
+            2) echo "⭐ 建议 2：80 有常见 Web 服务；需填写该 IP 实际使用的网站目录。" ;;
+            3) echo "⭐ 建议 3：80 已占用、443 未发现监听；仍需确认公网入站。" ;;
+            *) echo "⚠️ 无法可靠推荐，请检查现有服务或手动配置网站目录。" ;;
+        esac
+        echo "ℹ️ 80/443只是验证方式不同，最终证书不绑定验证端口。"
+        if [ "$dynamic_mode" = "1" ]; then
+            echo "ℹ️ 长期自动续期必须保留验证条件；443开始提供HTTPS后不能再被临时服务独占。"
+        fi
+        read -r -p "请选择${RECOMMENDED_CHALLENGE:+ [默认 $RECOMMENDED_CHALLENGE]}： " CHALLENGE_OPTION || return 1
+        CHALLENGE_OPTION="${CHALLENGE_OPTION:-$RECOMMENDED_CHALLENGE}"
+        case "$CHALLENGE_OPTION" in
+            1|3)
+                selected_state="$PORT80_STATE"
+                [ "$CHALLENGE_OPTION" = "1" ] || selected_state="$PORT443_STATE"
+                if [ "$selected_state" != "free" ]; then
+                    echo "❌ 所选端口已占用或状态未知，不会停止现有服务，请换一种方式。"
+                    continue
+                fi
+                WEBROOT_PATH=""
+                if [ "$CHALLENGE_OPTION" = "1" ]; then
+                    CHALLENGE_MODE="standalone"; VALIDATION_PORT=80
+                else
+                    CHALLENGE_MODE="alpn"; VALIDATION_PORT=443
+                fi
+                return 0
+                ;;
+            2)
+                read -r -p "现有网站的绝对根目录（如 /var/www/html，留空返回）： " WEBROOT_PATH || return 1
+                if [[ "$WEBROOT_PATH" != /* ]] || [ "$WEBROOT_PATH" = "/" ] ||
+                   [ ! -d "$WEBROOT_PATH" ] || [ ! -w "$WEBROOT_PATH" ]; then
+                    echo "❌ 请填写存在且可写的网站目录；不会自动猜目录或创建网站。"
+                    continue
+                fi
+                CHALLENGE_MODE="webroot"; VALIDATION_PORT=80
+                echo "ℹ️ 请确保 http://目标IP/.well-known/acme-challenge/ 映射到此目录。"
+                echo "   仅有目录不够；Nginx/Apache路由、80入站、NAT仍需正确配置。"
+                return 0
+                ;;
+            4) continue ;;
+            0) return 1 ;;
+            *) echo "❌ 无效选项，请重新选择。" ;;
+        esac
+    done
+}
 
+confirm_ip_request() {
+    local answer
     echo
-    echo "请选择 IP 地址验证方式："
-    echo "1）HTTP-01 standalone（使用 TCP 80，端口必须空闲）"
-    echo "2）HTTP-01 webroot（使用 TCP 80，适合已运行 Nginx/Apache）"
-    echo "3）TLS-ALPN-01（使用 TCP 443，端口必须空闲）"
-    if [ "$dynamic_mode" = "1" ]; then
-        echo "提示：动态 IP 长期自动重签时，如果 80 已被 Web 服务占用，推荐选择 2。"
-    fi
-    read -r -p "输入选项（1-3）： " CHALLENGE_OPTION
-
-    case "$CHALLENGE_OPTION" in
-        1)
-            CHALLENGE_MODE="standalone"
-            VALIDATION_PORT="80"
-            WEBROOT_PATH=""
-            ;;
-        2)
-            CHALLENGE_MODE="webroot"
-            VALIDATION_PORT="80"
-            read -r -p "请输入 Web 根目录（例如 /var/www/html）： " WEBROOT_PATH
-            [ -n "$WEBROOT_PATH" ] || die "Web 根目录不能为空。"
-            ;;
-        3)
-            CHALLENGE_MODE="alpn"
-            VALIDATION_PORT="443"
-            WEBROOT_PATH=""
-            ;;
-        *)
-            die "无效的验证方式。"
-            ;;
+    echo "============== 申请信息确认 =============="
+    echo "目标：$IDENTIFIER（IPv$IP_VERSION，$IP_SELECTION_MODE）"
+    echo "验证：$CHALLENGE_MODE，公网 TCP $VALIDATION_PORT"
+    [ "$CHALLENGE_MODE" != "webroot" ] || echo "网站目录：$WEBROOT_PATH"
+    echo "固定 IP 模式不会自动追踪 IP 变化；需要追踪请选择主菜单 3。"
+    read -r -p "继续申请？[Y/n]： " answer || return 1
+    case "$answer" in
+        ""|y|Y|yes|YES) return 0 ;;
+        *) echo "已取消，未申请证书。"; return 1 ;;
     esac
 }
 
@@ -181,15 +431,13 @@ check_challenge_port() {
         return 0
     fi
 
-    if command -v ss >/dev/null 2>&1; then
-        if ss -ltnH 2>/dev/null | awk '{print $4}' | grep -Eq ":${VALIDATION_PORT}$"; then
-            echo "❌ TCP ${VALIDATION_PORT} 已被其他程序占用，当前验证方式无法启动。"
-            ss -ltnp 2>/dev/null | grep -E ":${VALIDATION_PORT}[[:space:]]" || true
-            if [ "$VALIDATION_PORT" = "80" ]; then
-                echo "可以重新运行并选择 HTTP-01 webroot，避免停止现有 Web 服务。"
-            fi
-            exit 1
-        fi
+    # Recheck immediately before issuance: a listener may have appeared since the menu.
+    refresh_port_status
+    local state="$PORT80_STATE"
+    [ "$VALIDATION_PORT" = "80" ] || state="$PORT443_STATE"
+    if [ "$state" != "free" ]; then
+        show_port_status
+        die "TCP ${VALIDATION_PORT} 已占用或无法检测；不停止现有服务，请重新选择验证方式。"
     fi
 }
 
@@ -198,8 +446,7 @@ ensure_webroot() {
         return 0
     fi
 
-    mkdir -p "$WEBROOT_PATH"
-    [ -d "$WEBROOT_PATH" ] || die "无法创建 Web 根目录：$WEBROOT_PATH"
+    [ -d "$WEBROOT_PATH" ] || die "Web 根目录不存在，请配置现有网站目录：$WEBROOT_PATH"
     [ -w "$WEBROOT_PATH" ] || die "Web 根目录不可写：$WEBROOT_PATH"
 }
 
@@ -221,11 +468,6 @@ ensure_acme() {
 register_account() {
     echo "👤 正在注册/检查 ACME 账户..."
     "$ACME_BIN" --register-account -m "$EMAIL" --server "$CA_SERVER"
-}
-
-cleanup_failed_order() {
-    rm -f "$KEY_PATH" "$CERT_PATH"
-    "$ACME_BIN" --remove -d "$IDENTIFIER" >/dev/null 2>&1 || true
 }
 
 issue_static_certificate() {
@@ -260,11 +502,13 @@ issue_static_certificate() {
 
     echo
     echo "🚀 开始申请证书..."
-    if ! "$ACME_BIN" "${issue_args[@]}"; then
-        echo "❌ 证书申请失败，正在清理本次残留。"
-        cleanup_failed_order
-        exit 1
-    fi
+    local issue_rc=0
+    "$ACME_BIN" "${issue_args[@]}" || issue_rc=$?
+    case "$issue_rc" in
+        0) ;;
+        2) echo "ℹ️ acme.sh 跳过了重复签发，尝试安装已有证书；不强制重签。" ;;
+        *) die "证书申请失败，已保留现有证书、私钥及续期记录，请检查验证日志。" ;;
+    esac
 
     echo "📂 正在安装证书到固定路径..."
     "$ACME_BIN" --install-cert -d "$IDENTIFIER" \
@@ -385,7 +629,7 @@ setup_dynamic_ip_certificate() {
     read -r -p "请输入电子邮件地址: " EMAIL
     validate_email "$EMAIL" || die "电子邮件地址格式不正确。"
 
-    select_ip_challenge 1
+    select_ip_challenge 1 || { echo "已取消。"; return 0; }
 
     echo
     echo "证书每次签发/续期后，可以自动重载你的 Web 服务。"
@@ -567,6 +811,7 @@ manage_remote_ip_ssl() {
     "$REMOTE_RUNNER" menu
 }
 
+main() {
 require_root
 
 while true; do
@@ -648,14 +893,14 @@ if [ "$CERT_KIND" = "domain" ]; then
     CHALLENGE_MODE="standalone"
     VALIDATION_PORT="80"
 else
-    read -r -p "请输入固定公网 IP 地址（IPv4 或 IPv6）: " IDENTIFIER
-    [ -n "$IDENTIFIER" ] || die "IP 地址不能为空。"
+    select_public_ip || { echo "已取消。"; return 0; }
 
     read -r -p "请输入电子邮件地址: " EMAIL
     validate_email "$EMAIL" || die "电子邮件地址格式不正确。"
 
     CA_SERVER="letsencrypt"
-    select_ip_challenge 0
+    select_ip_challenge 0 || { echo "已取消。"; return 0; }
+    confirm_ip_request || return 0
 
     echo
     echo "ℹ️ IP 证书固定使用 Let's Encrypt shortlived 配置。"
@@ -701,3 +946,9 @@ ensure_acme
 register_account
 issue_static_certificate
 show_certificate_info
+}
+
+# Sourcing exposes functions for offline tests without opening menus or deploying.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi
