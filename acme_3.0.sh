@@ -495,17 +495,19 @@ select_server_deployment() {
     local choice confirm
     RELOAD_CMD=""
     while true; do
-        echo "证书用途："
-        echo "1）仅保存文件【默认；不重载，并清除此证书原有的自动重载设置】"
-        echo "2）保存并在签发/续期后执行指定重载命令"
+        echo "证书处理方式："
+        echo "1）只保存证书【默认】"
+        echo "   不自动重载网站/服务"
+        echo "2）保存证书并自动重载服务"
+        echo "   适合 Nginx/Apache 等，需要填写重载命令"
         echo "0）取消"
         read -r -p "请选择 [1]： " choice || return 1
         case "${choice:-1}" in
             1) return 0 ;;
             2)
-                read -r -p "重载命令（例如 systemctl reload nginx；留空返回）： " RELOAD_CMD || return 1
+                read -r -p "请输入服务重载命令（如 systemctl reload nginx；留空返回）： " RELOAD_CMD || return 1
                 [ -n "$RELOAD_CMD" ] || continue
-                printf '将以 root 执行并保存到 acme.sh 续期设置：%s\n' "$RELOAD_CMD"
+                printf '证书签发/续期成功后会自动执行：%s\n' "$RELOAD_CMD"
                 read -r -p "确认保存该命令？[y/N]： " confirm || return 1
                 case "$confirm" in y|Y|yes|YES) return 0 ;; *) RELOAD_CMD=""; echo "未确认，返回选择。" ;; esac
                 ;;

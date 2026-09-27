@@ -29,7 +29,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/slobys/SSL-Renewal/main/acme
 
 服务器本机动态 IP 入口暂时移除，已有证书、配置和自动任务保留；**OpenWrt 动态 IP 功能不受影响**。
 
-服务器证书可选仅保存文件或指定续期后重载命令；默认仅保存会清除此证书原有重载设置。检测到本地已有匹配证书时，可直接复用，或按当前 HTTP-01/Webroot/TLS-ALPN 方式强制重新验证签发；后者会消耗 CA 请求额度。不会擅自重启网站；Buypass 已停用，保留其他 CA 原编号。
+服务器证书可选 **只保存证书** 或 **保存证书并自动重载服务**；后者需要填写 Nginx/Apache 等服务的重载命令。默认只保存证书，不自动重载。检测到本地已有匹配证书时，可直接复用，或按当前 HTTP-01/Webroot/TLS-ALPN 方式强制重新验证签发；后者会消耗 CA 请求额度。Buypass 已停用，保留其他 CA 原编号。
 
 ## OpenWrt 怎么用
 

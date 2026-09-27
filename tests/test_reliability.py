@@ -230,6 +230,14 @@ class ServerReliabilityTests(unittest.TestCase):
         self.issue('RELOAD_CMD=""')
         self.assertIn('--reloadcmd :', (self.f.base/'acme.log').read_text())
 
+    def test_reload_menu_uses_simple_labels(self):
+        result = self.f.shell('select_server_deployment', '0\n', expected=None)
+        self.assertIn('1）只保存证书【默认】', result.stdout)
+        self.assertIn('2）保存证书并自动重载服务', result.stdout)
+        self.assertIn('不自动重载网站/服务', result.stdout)
+        self.assertIn('适合 Nginx/Apache', result.stdout)
+        self.assertNotIn('清除此证书原有的自动重载设置', result.stdout)
+
     def test_reload_prompt_requires_confirmation(self):
         result = self.f.shell('select_server_deployment; printf "HOOK=%s\\n" "$RELOAD_CMD"',
                               '2\nsystemctl reload nginx\nno\n1\n')
