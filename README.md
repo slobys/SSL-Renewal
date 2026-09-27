@@ -14,7 +14,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/slobys/SSL-Renewal/main/acme
 
 **入口前置条件：**设备需已有 `bash`、`curl`。OpenWrt 缺少时先通过 `opkg` / `apk` 安装；当前 Shell 不支持 `<(...)` 时，先输入 `bash` 再执行。软路由管理主体仍使用 `ash`，不需要 Python 或 Git；尚未启动的脚本不能补装入口自身缺少的命令。
 
-再次执行可更新脚本，保留证书和配置；已有远程任务不自动迁移或删除。
+再次执行可更新脚本，保留证书和配置；内部组件经非空、SHA-256 和语法检查再替换，旧程序备份到 `/root/ssl-renewal-backups/`，更新失败尝试回滚。校验清单用于 HTTPS 下载一致性，不是数字签名；已有远程任务不自动迁移或删除。
 
 ## 主菜单
 
@@ -29,17 +29,19 @@ bash <(curl -fsSL https://raw.githubusercontent.com/slobys/SSL-Renewal/main/acme
 
 服务器本机动态 IP 入口暂时移除，已有证书、配置和自动任务保留；**OpenWrt 动态 IP 功能不受影响**。
 
+服务器证书可选仅保存文件或指定续期后重载命令；默认仅保存会清除此证书原有重载设置。不会擅自重启网站；Buypass 已停用，保留其他 CA 原编号。
+
 ## OpenWrt 怎么用
 
-选择 **申请 / 重新配置 → IPv4 或 IPv6 → 动态公网 IP**，填写邮箱；接口通常为 `wan` / `wan6`。自动检测取 WAN 接口地址；光猫路由时可改选出口检测，固定模式支持手动 IP。
+选择 **申请 / 重新配置 → IPv4 或 IPv6 → 动态公网 IP**；接口通常为 `wan` / `wan6`。先只读预检地址，再填写邮箱和安装依赖。显示实际 WAN 地址、CGNAT/ULA 等原因；光猫路由可选出口检测，但检测结果不证明公网入站可用。
 
 验证选择 **HTTP-01（公网 TCP80）** 或 **TLS-ALPN-01（公网 TCP443）**。脚本只在验证期间把选定 WAN 入口转到本机专用端口，不停止 LuCI、不关闭防火墙、不修改 Dropbear；该公网端口的普通访问会短暂中断。
 
-证书用途可选 **仅保存文件** 或 **应用到 uHTTPd/LuCI**。后者会备份配置、更新证书路径并重启 uHTTPd；重载失败尝试回滚。其他服务可填写自己的重载命令。
+证书用途可选 **仅保存文件** 或 **应用到 uHTTPd/LuCI**。后者要求已有 HTTPS 监听/TLS 库且没有待提交的 UCI 修改；重启后通过本机 TLS 握手核验证书。不会自动开放管理端口；其他服务可填写重载命令，OpenWrt 重载超时会失败并尝试回滚。
 
-每 5 分钟检查：**IP 变化就重签；IP 未变但证书剩余不足 3 天也会续签。** 校验信任链、IP 和私钥后才部署；失败退避重试，保留旧证书。无需额外 LuCI 插件，依赖通过 `opkg/apk` 安装。
+**新配置先试运行，证书/部署成功才保存并启用任务；失败保留旧配置与证书。** 每 5 分钟检查 IP 变化和证书剩余不足 3 天的情况，校验信任链、IP、私钥后部署，失败退避重试。首次申请失败不新增自动任务；依赖通过 `opkg/apk` 安装。
 
-管理菜单提供状态、立即检查、停用 / 恢复。**OpenWrt 停用会同时停止重签和续签**，保留文件但证书会自然过期。
+状态页显示实际接口/目标 IP、任务与 cron 服务、剩余有效期、成功/失败记录及 LuCI 证书加载结果；本机验证不代表公网可达。**停用会同时停止重签和续签**，保留文件但证书会自然过期。
 
 ## 证书与日志
 
@@ -69,6 +71,6 @@ OpenWrt 卸载会停止重签和续签；清理模式会删除本项目专用数
 - IPv6 需使用路由器实际持有的全局地址，不是委派前缀。出口检测仍可能受透明代理影响。本项目不更新 DDNS，也不通知客户端新 IP。
 - 自动防火墙适配 fw4/nftables 与 fw3/iptables；定制固件仍需实机验证。升级固件前自行备份证书和配置。
 
-离线回归：`python3 -m unittest discover -s tests -q`。测试使用模拟 OpenWrt 命令和临时测试 CA；不代表真实公网入站或生产 CA 签发已经验证。
+离线回归：`python3 -m unittest discover -s tests -q`。包含真实回环 TLS/临时 CA 与模拟 OpenWrt 命令；不代表真实固件、防火墙或生产 CA 已验证。修改运行脚本后执行 `python3 tools/update_checksums.py` 更新校验清单。
 
 协议依据：[Let's Encrypt 验证方式](https://letsencrypt.org/docs/challenge-types/) · [证书 Profile](https://letsencrypt.org/docs/profiles/) · [acme.sh](https://github.com/acmesh-official/acme.sh)

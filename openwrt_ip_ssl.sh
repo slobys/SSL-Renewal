@@ -18,7 +18,7 @@ ow_log() {
     printf '%s [OpenWrt IP SSL] %s\n' "$(date '+%F %T')" "$*"
     if command -v logger >/dev/null 2>&1; then logger -t ssl-renewal-openwrt "$*" || true; fi
 }
-ow_die() { ow_log "错误：$*"; exit 1; }
+ow_die() { OW_LAST_ERROR=$*; ow_log "错误：$*"; exit 1; }
 ow_require() {
     [ "$(id -u)" = 0 ] || ow_die '请用 root 运行。'
     [ -f /etc/openwrt_release ] || ow_die '此模式必须在 OpenWrt / iStoreOS 本机运行，不会连接远程设备。'
@@ -205,6 +205,83 @@ ow_detect() {
     done
     return 1
 }
+# Read-only checks run before email/dependency prompts. An egress address is not
+# proof of public reachability; never change networking to make this check pass.
+ow_preflight() {
+    for cmd in ubus jsonfilter; do
+        command -v "$cmd" >/dev/null 2>&1 || { ow_log "缺少 $cmd，无法预检；请先安装该固件组件。"; return 1; }
+    done
+    if ! ow_network; then
+        ow_log "接口 $NETWORK 未就绪或没有 IPv$FAMILY 可用地址。"
+        if [ -n "${NETJSON:-}" ]; then
+            printf '%s\n' "$NETJSON" | jsonfilter -e '@["ipv6-address"][*].address' 2>/dev/null || true
+        fi
+        ow_log 'ULA（fc/fd 开头）、链路本地地址和委派前缀不能代替本机公网 IPv6。'
+        return 1
+    fi
+    ow_log "接口：$NETWORK / $WAN_DEVICE；接口地址：$LOCAL_ADDRESS"
+    if [ "$FAMILY" = 4 ] && ! ow_ip "$LOCAL_ADDRESS" 4 >/dev/null; then
+        case "$LOCAL_ADDRESS" in
+            100.*)
+                ow_log '此地址未通过公网判定；100.64.0.0/10 是运营商共享地址（常见于 CGNAT）。';;
+            *) ow_log '接口地址属于私网/特殊用途地址，不是可直接验证的公网 IPv4。';;
+        esac
+        [ "$SOURCE" != wan ] || return 1
+        ow_log '出口检测不能打通运营商 NAT；只有已具备上级公网入站映射才可能验证。'
+    fi
+    TARGET=$(ow_detect) || { ow_log '未获得可用公网 IP；未安装依赖、未申请证书。'; return 1; }
+    if [ "$FAMILY" = 6 ] && [ "$TARGET" != "$LOCAL_ADDRESS" ]; then
+        ow_log '目标 IPv6 不在选定接口上，不能使用其他设备地址或委派前缀。'
+        return 1
+    fi
+    ow_log "目标公网 IP：$TARGET（只检查地址条件，公网 80/443 可达性尚未验证）"
+}
+
+# Keep the operation lock in the parent ONLY. Hooks and every daemon they spawn
+# must not inherit FD 8/9. Capture output so a background child cannot keep the
+# caller's output pipe open. On timeout terminate only our own process group.
+ow_bounded() (
+    exec 8>&- 9>&-
+    limit=$1; shift
+    case "$limit" in ''|*[!0-9]*) exit 1;; esac
+    [ "$limit" -ge 1 ] && [ "$limit" -le 300 ] || exit 1
+    command -v setsid >/dev/null 2>&1 || exit 1
+    work=$(mktemp -d "$OW_RUN/command.XXXXXX") || exit 1
+    child=''; guard=''; completed=0
+    cleanup_command() {
+        [ -z "$guard" ] || { kill "$guard" 2>/dev/null || true; wait "$guard" 2>/dev/null || true; }
+        if [ "$completed" != 1 ] && [ -n "$child" ]; then
+            kill -TERM "-$child" 2>/dev/null || true
+            kill -KILL "-$child" 2>/dev/null || true
+        fi
+        rm -rf "$work"
+    }
+    trap cleanup_command EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    setsid "$@" </dev/null >"$work/output" 2>&1 & child=$!
+    (
+        sleeper=''
+        trap '[ -z "$sleeper" ] || kill "$sleeper" 2>/dev/null || true' EXIT
+        trap 'exit 0' INT TERM
+        sleep "$limit" & sleeper=$!
+        wait "$sleeper" || exit 0
+        : > "$work/timeout"
+        kill -TERM "-$child" 2>/dev/null || exit 0
+        sleep 2 & sleeper=$!
+        wait "$sleeper" || exit 0
+        kill -KILL "-$child" 2>/dev/null || true
+    ) </dev/null >/dev/null 2>&1 & guard=$!
+    rc=0
+    wait "$child" || rc=$?
+    if [ -f "$work/timeout" ]; then rc=124; fi
+    [ "$rc" -ne 0 ] || completed=1
+    cat "$work/output"
+    [ "$rc" != 124 ] || ow_log "命令超时（${limit} 秒），已停止本次命令。"
+    exit "$rc"
+)
+ow_reload() { ow_bounded "${SSL_RENEWAL_OPENWRT_RELOAD_TIMEOUT:-60}" "$@"; }
+
 ow_acme() (
     # Isolate the entire ACME/socat process group, not just the ACME shell.
     # Child daemons must never inherit the manager's flock descriptor.
@@ -358,9 +435,74 @@ ow_restore_uci() {
     else uci -q delete "uhttpd.$UHTTPD_SECTION.key" || true; fi
     uci commit uhttpd
 }
+# Map configured numeric listeners to local probe endpoints. Wildcard listeners
+# are checked via loopback. No listener, firewall or redirect is added here.
+ow_uhttpd_endpoints() (
+    listeners=$(uci -q get "uhttpd.$UHTTPD_SECTION.listen_https") || exit 1
+    [ -n "$listeners" ] || exit 1
+    count=0
+    for listener in $listeners; do
+        count=$((count + 1)); [ "$count" -le 8 ] || exit 1
+        case "$listener" in
+            \[*\]:*)
+                host=${listener#\[}; host=${host%%\]*}; port=${listener##*:}
+                host=$(ow_ip "$host" 6 0) || exit 1
+                [ "$host" != :: ] || host=::1
+                host="[$host]";;
+            *:*)
+                host=${listener%:*}; port=${listener##*:}
+                host=$(ow_ip "$host" 4 0) || exit 1
+                [ "$host" != 0.0.0.0 ] || host=127.0.0.1;;
+            *) host=127.0.0.1; port=$listener;;
+        esac
+        case "$port" in ''|*[!0-9]*) exit 1;; esac
+        [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || exit 1
+        printf '%s:%s\n' "$host" "$port"
+    done
+)
+ow_uhttpd_preflight() {
+    [ "$(uci -q get "uhttpd.$UHTTPD_SECTION")" = uhttpd ] || { ow_log '找不到该 uHTTPd 实例。'; return 1; }
+    changes=$(uci changes uhttpd) || return 1
+    [ -z "$changes" ] || { ow_log 'uHTTPd 有尚未提交的修改，请先保存/撤销；本项目不会顺带提交。'; return 1; }
+    [ -x "$OW_INIT/uhttpd" ] || { ow_log '找不到 uHTTPd 启动脚本。'; return 1; }
+    [ -f "${SSL_RENEWAL_OPENWRT_TLS_LIBRARY:-/lib/libustream-ssl.so}" ] || {
+        ow_log 'uHTTPd TLS 库未安装；请先配置 LuCI HTTPS，或选择仅保存证书。'; return 1;
+    }
+    ow_uhttpd_endpoints >/dev/null || { ow_log '此实例没有可核验的 listen_https；不会自动开放管理端口，请先配置或选择仅保存。'; return 1; }
+}
+ow_verify_uhttpd() (
+    expected_cert=$1; expected_ip=$2
+    endpoints=$(ow_uhttpd_endpoints) || exit 1
+    expected_fp=$(openssl x509 -in "$expected_cert" -noout -sha256 -fingerprint 2>/dev/null) || exit 1
+    [ -n "$expected_fp" ] || exit 1
+    probe=$(mktemp -d "$OW_RUN/tls-probe.XXXXXX") || exit 1
+    trap 'rm -rf "$probe"' EXIT
+    # A real local TLS handshake proves a listener is serving this exact cert.
+    # Verifying the target IP is separate from the loopback transport address.
+    deadline=$(( $(date +%s) + 20 ))
+    for attempt in 1 2 3; do
+        for endpoint in $endpoints; do
+            [ "$(date +%s)" -lt "$deadline" ] || break 2
+            if ow_bounded 4 openssl s_client -connect "$endpoint" -noservername \
+                -showcerts -verify_return_error -verify_ip "$expected_ip" \
+                > "$probe/peer" 2>/dev/null; then
+                peer_fp=$(openssl x509 -in "$probe/peer" -noout -sha256 -fingerprint 2>/dev/null || true)
+                if [ "$peer_fp" = "$expected_fp" ]; then
+                    printf 'HTTPS 已加载目标证书（本机探测 %s；不代表公网可达）。\n' "$endpoint"
+                    exit 0
+                fi
+            fi
+        done
+        sleep 1
+    done
+    ow_log 'uHTTPd 重启后未提供预期证书，部署不算成功。'
+    exit 1
+)
+
 ow_deploy() (
     # Both files are immutable within a generation; one symlink switches the pair.
     set -e
+    [ "$DEPLOY" != uhttpd ] || ow_uhttpd_preflight
     mkdir -p "$CERTROOT"
     [ ! -e "$CERTROOT/current" ] || [ -L "$CERTROOT/current" ] || exit 1
     old=$(readlink "$CERTROOT/current" 2>/dev/null || true)
@@ -377,8 +519,8 @@ ow_deploy() (
             fi
             if [ "$uci_changed" = 1 ]; then ow_restore_uci || true; fi
             if [ "$switched" = 1 ]; then
-                if [ "$DEPLOY" = uhttpd ]; then "$OW_INIT/uhttpd" restart >/dev/null 2>&1 || true
-                elif [ -n "$RELOAD_CMD" ]; then sh -c "$RELOAD_CMD" >/dev/null 2>&1 || true; fi
+                if [ "$DEPLOY" = uhttpd ]; then ow_reload "$OW_INIT/uhttpd" restart >/dev/null 2>&1 || true
+                elif [ -n "$RELOAD_CMD" ]; then ow_reload sh -c "$RELOAD_CMD" >/dev/null 2>&1 || true; fi
             fi
             rm -rf "$generation"
         fi
@@ -406,9 +548,12 @@ ow_deploy() (
         uci set "uhttpd.$UHTTPD_SECTION.cert=$CERTROOT/current/fullchain.pem"
         uci set "uhttpd.$UHTTPD_SECTION.key=$CERTROOT/current/privkey.pem"
         uci commit uhttpd
-        "$OW_INIT/uhttpd" restart
-    elif [ -n "$RELOAD_CMD" ]; then sh -c "$RELOAD_CMD"; fi
+        ow_reload "$OW_INIT/uhttpd" restart
+        ow_verify_uhttpd "$CERTROOT/current/fullchain.pem" "$TARGET"
+    elif [ -n "$RELOAD_CMD" ]; then ow_reload sh -c "$RELOAD_CMD"; fi
     finished=1
+    # Trial configuration may need to roll back even after a successful reload.
+    [ "${OW_CONFIG_TRIAL:-0}" != 1 ] || exit 0
     # Only prune this manager's old generations, retaining current + previous.
     for d in "$CERTROOT"/g-*; do
         [ -d "$d" ] || continue
@@ -423,7 +568,21 @@ ow_run_check() {
     # Re-read after taking the uninstall/operation lock, never use stale config.
     [ ! -f "$OW_RUN/uninstalled" ] || return 0
     ow_load "$1"
-    [ ! -f "$DISABLED" ] || { ow_log "IPv$FAMILY 已停用自动管理（证书保留）。"; return 0; }
+    ow_check_body
+}
+ow_record_check() {
+    printf '%s|%s|%s\n' "$(date '+%F %T')" "$1" "$2" > "$OW_RUN/v$FAMILY.last-check.new"
+    mv -f "$OW_RUN/v$FAMILY.last-check.new" "$OW_RUN/v$FAMILY.last-check"
+    if [ "$1" != 0 ]; then cp "$OW_RUN/v$FAMILY.last-check" "$OW_RUN/v$FAMILY.last-error"; fi
+}
+ow_check_body() {
+    OW_LAST_ERROR=''; success=0; ow_attempted=0; check_note='检查未完成'
+    trap 'result_rc=$?; ow_cleanup; if [ "$ow_attempted" = 1 ] && [ "$success" != 1 ]; then ow_failed; fi; if [ "$result_rc" != 0 ]; then check_note=${OW_LAST_ERROR:-申请或部署失败，请查看日志}; fi; ow_record_check "$result_rc" "$check_note"' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    if [ -f "$DISABLED" ] && [ "${OW_CONFIG_TRIAL:-0}" != 1 ]; then
+        check_note='自动管理已停用'; ow_log "IPv$FAMILY 已停用自动管理（证书保留）。"; return 0
+    fi
     [ -s "$OW_ACME" ] || ow_die '请先完成开通，专用 ACME 客户端不存在。'
     ow_network || ow_die "接口 $NETWORK 未就绪/地址不可用，请检查 WAN。"
     TARGET=$(ow_detect) || ow_die '未获得可用公网 IP；WAN 为私网时可选择出口检测，但仍需公网端口映射。'
@@ -431,22 +590,28 @@ ow_run_check() {
     if [ "$FAMILY" = 6 ] && [ "$TARGET" != "$LOCAL_ADDRESS" ]; then
         ow_die '目标 IPv6 与选定接口地址不同，请使用实际承载服务的稳定接口地址。'
     fi
+    [ "$DEPLOY" != uhttpd ] || ow_uhttpd_preflight || ow_die 'LuCI HTTPS 使用条件不满足，未请求 CA。'
     config_digest=$(sha256sum "$CONF" | awk '{print $1}')
     if ow_certificate_valid "$CERTROOT/current/fullchain.pem" "$CERTROOT/current/privkey.pem" "$TARGET" 259200; then
         if [ "$(cat "$RECEIPT" 2>/dev/null || true)" = "$TARGET|$config_digest" ]; then
-            ow_log "IPv$FAMILY：$TARGET 未变化且证书有效期充足，无需签发。"
-            return 0
+            loaded=1
+            if [ "$DEPLOY" = uhttpd ]; then
+                ow_verify_uhttpd "$CERTROOT/current/fullchain.pem" "$TARGET" >/dev/null || loaded=0
+            fi
+            if [ "$loaded" = 1 ]; then
+                check_note='IP 未变化，证书有效'; success=1
+                ow_log "IPv$FAMILY：$TARGET 未变化且证书有效期充足，无需签发。"
+                return 0
+            fi
+            ow_log '文件有效但服务未加载，将复用证书尝试重新部署。'
         fi
         # Changing deployment settings must apply even when the IP did not change.
         mkdir -p "$PENDING"
         cp "$CERTROOT/current/fullchain.pem" "$PENDING/fullchain.pem"
         cp "$CERTROOT/current/privkey.pem" "$PENDING/privkey.pem"
     fi
-    if ! ow_retry_ready; then ow_log '上次失败后的退避期内，本次不向 CA 重试。'; return 0; fi
-    success=0
-    trap 'ow_cleanup; if [ "$success" != 1 ]; then ow_failed; fi' EXIT
-    trap 'exit 130' INT
-    trap 'exit 143' TERM
+    if ! ow_retry_ready; then check_note='失败退避中'; ow_log '上次失败后的退避期内，本次不向 CA 重试。'; return 0; fi
+    ow_attempted=1
     mkdir -p "$PENDING" "$ACME_CONFIG"
     # A previous issuance may have succeeded while service reload failed. Reuse it.
     if ! ow_certificate_valid "$PENDING/fullchain.pem" "$PENDING/privkey.pem" "$TARGET" 259200; then
@@ -482,47 +647,204 @@ ow_run_check() {
     printf '%s|%s\n' "$TARGET" "$config_digest" > "$RECEIPT.new"
     mv -f "$RECEIPT.new" "$RECEIPT"
     rm -f "$RETRY"
-    success=1
-    if [ -n "$old_ip" ] && [ "$old_ip" != "$TARGET" ]; then
+    success=1; check_note='证书部署成功'
+    date '+%F %T' > "$OW_BASE/v$FAMILY.success"
+    if [ "${OW_CONFIG_TRIAL:-0}" != 1 ] && [ -n "$old_ip" ] && [ "$old_ip" != "$TARGET" ]; then
         ow_acme --remove -d "$old_ip" --ecc >/dev/null 2>&1 || true
     fi
     ow_log "已更新 IPv$FAMILY：$TARGET；证书：$CERTROOT/current/fullchain.pem"
     ow_log "私钥：$CERTROOT/current/privkey.pem（仅保存在软路由）。"
 }
 
+ow_cron_line() { printf '*/5 * * * * /bin/sh %s check-all >/dev/null 2>&1 %s\n' "$OW_SELF" "$OW_MARKER"; }
+ow_edit_cron() (
+    # Exact generated line only. Serialize our writers; reject external edits
+    # observed between snapshot and replacement instead of losing other jobs.
+    mode=$1
+    case "$mode" in 0|1) ;; *) exit 1;; esac
+    [ ! -L "$OW_CRONTAB" ] || exit 1
+    mkdir -p "$(dirname "$OW_CRONTAB")" "$OW_RUN"
+    exec 8>"$OW_RUN/cron.lock"
+    flock -n 8 || { ow_log '另一个定时任务编辑正在运行。'; exit 1; }
+    before=$(mktemp "$OW_CRONTAB.before.XXXXXX") || exit 1
+    after=$(mktemp "$OW_CRONTAB.after.XXXXXX") || { rm -f "$before"; exit 1; }
+    trap 'rm -f "$before" "$after"' EXIT
+    had=0
+    if [ -e "$OW_CRONTAB" ]; then
+        [ -f "$OW_CRONTAB" ] || exit 1
+        cp -p "$OW_CRONTAB" "$before" || exit 1
+        had=1
+    fi
+    expected=$(ow_cron_line)
+    awk -v expected="$expected" '$0!=expected' "$before" > "$after" || exit 1
+    [ "$mode" = 0 ] || printf '%s\n' "$expected" >> "$after"
+    chmod 600 "$after" || exit 1
+    if [ "$had" = 1 ]; then
+        cmp -s "$before" "$OW_CRONTAB" || { ow_log 'crontab 已被其他程序修改，未覆盖，请重试。'; exit 1; }
+        cmp -s "$before" "$after" && exit 0
+    else
+        [ ! -e "$OW_CRONTAB" ] || { ow_log 'crontab 已被其他程序创建，未覆盖。'; exit 1; }
+        [ -s "$after" ] || exit 0
+    fi
+    mv -f "$after" "$OW_CRONTAB"
+)
 ow_cron() {
-    # Preserve every unrelated job. Read the actual OpenWrt root crontab, not an
-    # ambiguous crontab -l failure which could erase an existing crontab.
-    mkdir -p "$(dirname "$OW_CRONTAB")"
-    [ -f "$OW_CRONTAB" ] || : > "$OW_CRONTAB"
-    awk -v marker="$OW_MARKER" 'index($0,marker)==0' "$OW_CRONTAB" > "$OW_CRONTAB.sslrenewal"
     active=0
     for f in 4 6; do
         if [ -f "$OW_BASE/v$f.conf" ] && [ ! -f "$OW_BASE/v$f.disabled" ]; then active=1; fi
     done
     if [ "$active" = 1 ]; then
-        printf '*/5 * * * * /bin/sh %s check-all >/dev/null 2>&1 %s\n' "$OW_SELF" "$OW_MARKER" >> "$OW_CRONTAB.sslrenewal"
+        ow_reload "$OW_INIT/cron" enable || return 1
+        ow_reload "$OW_INIT/cron" start || return 1
     fi
-    chmod 600 "$OW_CRONTAB.sslrenewal"
-    mv -f "$OW_CRONTAB.sslrenewal" "$OW_CRONTAB"
-    "$OW_INIT/cron" enable
-    "$OW_INIT/cron" start
+    ow_edit_cron "$active"
 }
+ow_remaining() (
+    expiry=$(openssl x509 -in "$1" -noout -enddate 2>/dev/null) || exit 1
+    # BusyBox date accepts numeric UTC dates; avoid GNU-only natural-language parsing.
+    numeric=$(printf '%s\n' "${expiry#*=}" | LC_ALL=C awk '
+        BEGIN {split("Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec",m," ");for(i=1;i<=12;i++)month[m[i]]=i}
+        NF==5 && month[$1] {printf "%04d-%02d-%02d %s",$4,month[$1],$2,$3}')
+    if [ -n "$numeric" ] && end=$(date -u -d "$numeric" +%s 2>/dev/null); then
+        seconds=$((end - $(date +%s)))
+        if [ "$seconds" -le 0 ]; then echo '已过期'
+        else printf '%s 天 %s 小时（约）\n' "$((seconds / 86400))" "$((seconds % 86400 / 3600))"; fi
+    else printf '%s\n' "$expiry"; fi
+)
 ow_status() {
+    expected=$(ow_cron_line)
+    if [ -f "$OW_CRONTAB" ] && grep -Fqx "$expected" "$OW_CRONTAB"; then echo '定时任务：存在'
+    else echo '定时任务：不存在（有配置不等于任务已启用）'; fi
+    if [ -x "$OW_INIT/cron" ]; then
+        if "$OW_INIT/cron" running >/dev/null 2>&1; then echo 'cron 服务：运行中'
+        else echo 'cron 服务：未运行或无法确认'; fi
+    else echo 'cron 服务：不存在'; fi
     for f in 4 6; do
+        if [ -f "$OW_RUN/v$f.setup-error" ]; then cat "$OW_RUN/v$f.setup-error"; fi
         if [ ! -f "$OW_BASE/v$f.conf" ]; then printf 'IPv%s：未配置\n' "$f"; continue; fi
         (
             ow_load "$f"
             printf '\nIPv%s：模式=%s；接口=%s；验证=%s；部署=%s\n' "$f" "$MODE" "$NETWORK" "$CHALLENGE" "$DEPLOY"
-            [ ! -f "$DISABLED" ] && echo '自动管理：已配置启用（请同时检查 cron 服务）' || echo '自动管理：已停用，证书不会自动续签'
-            printf '上次成功 IP：'; cat "$STATE" 2>/dev/null || echo '尚未成功'
+            [ ! -f "$DISABLED" ] && echo '自动管理：配置已启用（同时核对上方任务/服务状态）' || echo '自动管理：已停用，证书不会自动续签'
+            if ow_network; then
+                printf '当前接口地址：%s\n' "$LOCAL_ADDRESS"
+                if observed=$(ow_detect); then printf '当前目标地址：%s（公网入站未验证）\n' "$observed"
+                else echo '当前目标地址：未获得可用公网 IP'; fi
+            else echo '当前接口地址：接口未就绪或无可用地址'; fi
+            printf '证书对应的上次成功 IP：'; cat "$STATE" 2>/dev/null || echo '尚未成功'
+            printf '上次成功部署：'; cat "$OW_BASE/v$FAMILY.success" 2>/dev/null || echo '无记录（旧版未记录）'
+            printf '最近检查（时间|退出码|说明）：'; cat "$OW_RUN/v$FAMILY.last-check" 2>/dev/null || echo '无记录/重启后尚未检查'
+            if [ -f "$OW_RUN/v$FAMILY.last-error" ]; then printf '最近失败：'; cat "$OW_RUN/v$FAMILY.last-error"; fi
             printf '证书：%s/current/fullchain.pem\n私钥：%s/current/privkey.pem\n' "$CERTROOT" "$CERTROOT"
-            if [ -s "$CERTROOT/current/fullchain.pem" ]; then openssl x509 -in "$CERTROOT/current/fullchain.pem" -noout -dates; fi
+            if [ -s "$CERTROOT/current/fullchain.pem" ]; then
+                openssl x509 -in "$CERTROOT/current/fullchain.pem" -noout -dates || true
+                printf '剩余有效期：'; ow_remaining "$CERTROOT/current/fullchain.pem" || true
+                if [ "$DEPLOY" = uhttpd ] && [ -d "$OW_RUN" ]; then
+                    managed=$(cat "$STATE" 2>/dev/null || true)
+                    ow_verify_uhttpd "$CERTROOT/current/fullchain.pem" "$managed" || echo '服务证书：尚未核验成功（没有修改或重启服务）'
+                fi
+            fi
             if [ -f "$RETRY" ]; then printf '失败退避（IP|次数|下次时间戳）：'; cat "$RETRY"; fi
         )
     done
     echo '日志：logread -e ssl-renewal-openwrt'
 }
+# Try a candidate under the existing operation lock. Cron continues to see the
+# old config. Only after successful certificate/service verification is the new
+# config published and the generated job enabled. Rollback never restores an
+# entire stale crontab or an entire unrelated UCI configuration.
+ow_apply_config() (
+    set -eu
+    active_conf=$CONF
+    transaction=$(mktemp -d "$OW_RUN/setup.XXXXXX")
+    had_conf=0; config_published=0; trial_started=0; cron_touched=0; committed=0
+    old_job=0
+    expected=$(ow_cron_line)
+    if [ -f "$OW_CRONTAB" ] && grep -Fqx "$expected" "$OW_CRONTAB"; then old_job=1; fi
+    old_link=$(readlink "$CERTROOT/current" 2>/dev/null || true)
+    if [ -f "$active_conf" ]; then cp -p "$active_conf" "$transaction/config"; had_conf=1; fi
+    for name in "$STATE" "$RECEIPT" "$DISABLED" "$RETRY" "$OW_BASE/v$FAMILY.success" "$OW_RUN/uninstalled"; do
+        [ ! -f "$name" ] || cp -p "$name" "$transaction/${name##*/}"
+    done
+    trial_section=$UHTTPD_SECTION
+    trial_deploy=$DEPLOY
+    before_cert=''; before_key=''
+    if [ "$DEPLOY" = uhttpd ]; then
+        ow_uhttpd_preflight || exit 1
+        before_cert=$(uci -q get "uhttpd.$UHTTPD_SECTION.cert" || true)
+        before_key=$(uci -q get "uhttpd.$UHTTPD_SECTION.key" || true)
+    fi
+    rollback_config() {
+        if [ "$committed" != 1 ] && [ "$trial_started" = 1 ]; then
+            if [ "$config_published" = 1 ]; then
+                if [ "$had_conf" = 1 ]; then cp -p "$transaction/config" "$active_conf.new" && mv -f "$active_conf.new" "$active_conf"
+                else rm -f "$active_conf"; fi
+            fi
+            current=$(readlink "$CERTROOT/current" 2>/dev/null || true)
+            if [ "$current" != "$old_link" ]; then
+                rm -f "$CERTROOT/current.new"
+                if [ -n "$old_link" ]; then ow_link "$old_link" || true
+                else rm -f "$CERTROOT/current"; fi
+            fi
+            for name in "$STATE" "$RECEIPT" "$DISABLED" "$RETRY" "$OW_BASE/v$FAMILY.success" "$OW_RUN/uninstalled"; do
+                if [ -f "$transaction/${name##*/}" ]; then cp -p "$transaction/${name##*/}" "$name"
+                else rm -f "$name"; fi
+            done
+            if [ "$trial_deploy" = uhttpd ]; then
+                UHTTPD_SECTION=$trial_section
+                old_cert_option=$before_cert; old_key_option=$before_key
+                # The trial already rolls back ordinary reload failures. Restore
+                # paths here as well when a later config/cron commit failed.
+                now_cert=$(uci -q get "uhttpd.$UHTTPD_SECTION.cert" || true)
+                now_key=$(uci -q get "uhttpd.$UHTTPD_SECTION.key" || true)
+                if [ "$now_cert" != "$before_cert" ] || [ "$now_key" != "$before_key" ]; then
+                    ow_restore_uci || ow_log 'uHTTPd 路径回滚失败，请检查保留的证书文件。'
+                    ow_reload "$OW_INIT/uhttpd" restart >/dev/null 2>&1 || true
+                fi
+            fi
+            if [ "$had_conf" = 1 ] && [ "$current" != "$old_link" ]; then
+                ( ow_load "$FAMILY"; if [ "$DEPLOY" = uhttpd ]; then ow_reload "$OW_INIT/uhttpd" restart
+                  elif [ -n "$RELOAD_CMD" ]; then ow_reload sh -c "$RELOAD_CMD"; fi ) >/dev/null 2>&1 || true
+            fi
+            [ "$cron_touched" = 0 ] || ow_edit_cron "$old_job" || ow_log '自动任务回滚未完成，请检查 crontab。'
+            printf '%s：新配置试运行失败；原正式配置和任务状态保留。\n' "$(date '+%F %T')" > "$OW_RUN/v$FAMILY.setup-error"
+            ow_log '新配置未生效，已恢复原配置/证书引用；首次申请失败时不启用自动任务。'
+        fi
+        rm -rf "$transaction"
+    }
+    trap rollback_config EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    CONF="$transaction/candidate.conf"
+    ow_save_config
+    candidate_digest=$(sha256sum "$CONF" | awk '{print $1}')
+    OW_CONFIG_TRIAL=1
+    trial_started=1
+    rm -f "$RETRY"
+    # No if/|| around this subshell: preserve errexit inside all trial functions.
+    set +e
+    ( set -eu; ow_check_body )
+    trial_rc=$?
+    set -e
+    [ "$trial_rc" = 0 ] || exit "$trial_rc"
+    trial_ip=$(cat "$STATE" 2>/dev/null || true)
+    [ -n "$trial_ip" ] && [ "$(cat "$RECEIPT" 2>/dev/null || true)" = "$trial_ip|$candidate_digest" ] || exit 1
+    # A concurrent configuration edit must not be silently overwritten.
+    if [ "$had_conf" = 1 ]; then cmp -s "$transaction/config" "$active_conf" || exit 1
+    else [ ! -e "$active_conf" ] || exit 1; fi
+    cp "$CONF" "$active_conf.new"
+    chmod 600 "$active_conf.new"
+    mv -f "$active_conf.new" "$active_conf"
+    config_published=1
+    CONF=$active_conf
+    rm -f "$DISABLED" "$RETRY" "$OW_RUN/uninstalled"
+    cron_touched=1
+    ow_cron
+    committed=1
+    rm -f "$OW_RUN/v$FAMILY.setup-error"
+    ow_log '申请/部署验证通过，配置已保存，自动管理已启用（每 5 分钟检查）。'
+)
+
 ow_prompt() { printf '%s' "$1"; IFS= read -r ANSWER; }
 ow_setup() {
     ow_require
@@ -547,6 +869,7 @@ ow_setup() {
         ow_prompt '输入固定公网 IP（仅地址）：' || return 0
         FIXED_IP=$(ow_ip "$ANSWER" "$FAMILY") || ow_die '不是支持的公网单播 IP。'
     fi
+    ow_preflight || ow_die '地址预检未通过；未安装依赖或提交证书申请。'
     ow_prompt '电子邮件地址：' || return 0
     EMAIL=$ANSWER
     ow_prompt '公网验证：1）HTTP-01 TCP80（推荐） 2）TLS-ALPN-01 TCP443 [1]：' || return 0
@@ -571,6 +894,7 @@ ow_setup() {
             ;;
         *) ow_die '无效选项。';;
     esac
+    [ "$DEPLOY" != uhttpd ] || ow_uhttpd_preflight || ow_die '请先配置 LuCI HTTPS，或重新选择仅保存证书。'
     ow_validate_config || ow_die '配置不合法。'
     echo '此模式在软路由本机运行，不需要云服务器、SSH 隧道或 ZeroTier。'
     echo '将安装 curl/openssl/socat/flock 等依赖，按需临时接管选定 WAN 的验证端口。'
@@ -589,14 +913,7 @@ ow_setup() {
     TARGET=$(ow_detect) || ow_die '检测不到公网 IP：光猫路由时改选出口检测；CGNAT 不能直接验证。'
     ow_log "本次目标：$TARGET；接口：$NETWORK ($WAN_DEVICE)"
     ow_firewall_kind || ow_die '不支持当前防火墙，未安装自动任务。'
-    ow_save_config
-    rm -f "$DISABLED" "$RETRY"
-    rm -f "$OW_RUN/uninstalled"
-    ow_cron
-    exec 9>&-
-    ow_log '已启用每 5 分钟检查：IP 变化时重签，IP 未变但证书剩余不足 3 天时续签。'
-    # New process preserves fail-fast semantics and acquires its own operation lock.
-    sh "$OW_SELF" check "$FAMILY"
+    ow_apply_config
 }
 ow_toggle() {
     ow_require
@@ -668,7 +985,7 @@ ow_uninstall_luci() (
         if [ "$done_ok" != 1 ]; then
             while IFS='|' read -r option oldpath newpath; do uci set "$option=$oldpath" || true; done < "$snapshot"
             uci commit uhttpd || true
-            "$OW_INIT/uhttpd" restart >/dev/null 2>&1 || true
+            ow_reload "$OW_INIT/uhttpd" restart >/dev/null 2>&1 || true
         fi
     }
     trap rollback_uninstall_uci EXIT
@@ -676,7 +993,7 @@ ow_uninstall_luci() (
     trap 'exit 143' TERM
     while IFS='|' read -r option oldpath newpath; do uci set "$option=$newpath"; done < "$snapshot"
     uci commit uhttpd
-    "$OW_INIT/uhttpd" restart
+    ow_reload "$OW_INIT/uhttpd" restart
     done_ok=1
     ow_log 'LuCI 已改为读取备份中的同一张证书；保留其他 uHTTPd 设置，不降级到 HTTP。'
 )
@@ -721,7 +1038,7 @@ ow_uninstall() {
         for item in "$OW_BASE"/* "$OW_BASE"/.[!.]* "$OW_BASE"/..?*; do
             [ -e "$item" ] || [ -L "$item" ] || continue
             case "${item##*/}" in
-                v4.conf|v6.conf|v4.ip|v6.ip|v4.deployed|v6.deployed|v4.disabled|v6.disabled|certs|pending|acme|client|backups) ;;
+                v4.conf|v6.conf|v4.ip|v6.ip|v4.deployed|v6.deployed|v4.success|v6.success|v4.disabled|v6.disabled|certs|pending|acme|client|backups) ;;
                 *) ow_die "数据目录含未知文件，未清理：$item（可选择保留卸载）";;
             esac
         done
@@ -767,6 +1084,7 @@ ow_uninstall() {
     ow_log '正在使用的备份证书也会到期，请及时重装或切换到其他续期方案。'
 }
 ow_main() {
+    if [ "${1:-menu}" = self-test ]; then printf 'SSL-RENEWAL-OPENWRT-READY-v1\n'; return 0; fi
     ow_require
     case "${1:-menu}" in
         setup) ow_setup;;

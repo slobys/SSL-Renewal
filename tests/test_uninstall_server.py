@@ -217,7 +217,8 @@ else:
 
     def test_bootstrap_reinstalls_uninstaller_and_clears_only_own_marker(self):
         source=(ROOT/'acme.sh').read_text()
-        self.assertIn('install -m 700 "$DOWNLOAD_DIR/repo/uninstall_server.py" /root/uninstall_server.py',source)
+        self.assertIn('openwrt_ip_ssl.sh uninstall_server.py; do',source)
+        self.assertIn('publish_file "$DOWNLOAD_DIR/repo/$file" "/root/$file"',source)
         self.assertIn('rm -f /root/.ssl-renewal/server.uninstalled',source)
         self.assertNotIn('rm -rf /root/.acme.sh',source)
 

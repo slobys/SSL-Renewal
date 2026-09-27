@@ -470,9 +470,51 @@ register_account() {
     "$ACME_BIN" --register-account -m "$EMAIL" --server "$CA_SERVER"
 }
 
+select_domain_ca() {
+    local choice
+    while true; do
+        echo "请选择证书颁发机构（CA）："
+        echo "1）Let's Encrypt【默认】"
+        echo "2）Buypass【已停止签发，不可选】"
+        echo "3）ZeroSSL"
+        echo "0）取消"
+        read -r -p "请选择 [1]： " choice || return 1
+        case "${choice:-1}" in
+            1) CA_SERVER=letsencrypt; return 0 ;;
+            2) echo "Buypass 已于 2025-10-16 停止 TLS/SSL 订购和续签，请选择其他 CA。" ;;
+            3) CA_SERVER=zerossl; return 0 ;;
+            0) return 1 ;;
+            *) echo "无效选项。" ;;
+        esac
+    done
+}
+select_server_deployment() {
+    local choice confirm
+    RELOAD_CMD=""
+    while true; do
+        echo "证书用途："
+        echo "1）仅保存文件【默认；不重载，并清除此证书原有的自动重载设置】"
+        echo "2）保存并在签发/续期后执行指定重载命令"
+        echo "0）取消"
+        read -r -p "请选择 [1]： " choice || return 1
+        case "${choice:-1}" in
+            1) return 0 ;;
+            2)
+                read -r -p "重载命令（例如 systemctl reload nginx；留空返回）： " RELOAD_CMD || return 1
+                [ -n "$RELOAD_CMD" ] || continue
+                printf '将以 root 执行并保存到 acme.sh 续期设置：%s\n' "$RELOAD_CMD"
+                read -r -p "确认保存该命令？[y/N]： " confirm || return 1
+                case "$confirm" in y|Y|yes|YES) return 0 ;; *) RELOAD_CMD=""; echo "未确认，返回选择。" ;; esac
+                ;;
+            0) return 1 ;;
+            *) echo "无效选项。" ;;
+        esac
+    done
+}
+
 issue_static_certificate() {
     local issue_args
-    issue_args=(--issue -d "$IDENTIFIER" --server "$CA_SERVER")
+    issue_args=(--issue -d "$IDENTIFIER" --server "$CA_SERVER" --keylength ec-256)
 
     if [ "$CERT_KIND" = "ip" ]; then
         issue_args+=(--cert-profile shortlived --days 3)
@@ -511,17 +553,25 @@ issue_static_certificate() {
     esac
 
     echo "📂 正在安装证书到固定路径..."
-    "$ACME_BIN" --install-cert -d "$IDENTIFIER" \
-        --key-file "$KEY_PATH" \
-        --fullchain-file "$CERT_PATH"
+    local install_args=(--install-cert -d "$IDENTIFIER" --ecc
+        --key-file "$KEY_PATH" --fullchain-file "$CERT_PATH")
+    # Explicit no-op prevents acme.sh from silently reusing an older reload hook.
+    install_args+=(--reloadcmd "${RELOAD_CMD:-:}")
+    "$ACME_BIN" "${install_args[@]}"
 }
 
 show_certificate_info() {
     echo
     echo "============== 申请完成 =============="
-    echo "✅ SSL 证书申请成功！"
+    echo "✅ 证书文件已安装（含复用已有证书的情况）。"
     echo "📄 证书路径: $CERT_PATH"
     echo "🔐 私钥路径: $KEY_PATH"
+    if [ -n "$RELOAD_CMD" ]; then
+        echo "⚙️ 已保存并执行重载命令；后续 acme.sh 续期也会调用。"
+        echo "ℹ️ 命令返回成功不等于公网验证成功，请核对网站实际提供的证书。"
+    else
+        echo "ℹ️ 当前仅保存文件；未自动重载网站，请在服务中配置证书或重载。"
+    fi
 
     if [ "$CERT_KIND" = "ip" ]; then
         echo "🌐 IP 地址: $IDENTIFIER"
@@ -878,7 +928,7 @@ manage_openwrt_local() {
     if [ ! -f /etc/openwrt_release ]; then
         echo "第 3 项需要直接在 OpenWrt 软路由上运行，不再由云服务器代办。"
         echo "请在软路由 SSH 终端执行："
-        echo "wget -O /tmp/ssl-renewal-install.sh https://raw.githubusercontent.com/slobys/SSL-Renewal/main/acme.sh && sh /tmp/ssl-renewal-install.sh"
+        echo "bash <(curl -fsSL https://raw.githubusercontent.com/slobys/SSL-Renewal/main/acme.sh)"
         echo "不会安装远程组件、连接其他设备或修改本机网络。"
         pause_menu || true
         return 0
@@ -989,17 +1039,7 @@ if [ "$CERT_KIND" = "domain" ]; then
     validate_email "$EMAIL" || die "电子邮件地址格式不正确。"
 
     echo
-    echo "请选择证书颁发机构（CA）："
-    echo "1）Let's Encrypt"
-    echo "2）Buypass"
-    echo "3）ZeroSSL"
-    read -r -p "输入选项（1-3）： " CA_OPTION
-    case "$CA_OPTION" in
-        1) CA_SERVER="letsencrypt" ;;
-        2) CA_SERVER="buypass" ;;
-        3) CA_SERVER="zerossl" ;;
-        *) die "无效的 CA 选项。" ;;
-    esac
+    select_domain_ca || { echo "已取消。"; return 0; }
 
     CHALLENGE_MODE="standalone"
     VALIDATION_PORT="80"
@@ -1018,6 +1058,7 @@ else
     echo "ℹ️ 证书有效期为 160 小时，因此必须依赖自动续期。"
 fi
 
+select_server_deployment || { echo "已取消，未申请证书。"; return 0; }
 select_firewall_action
 detect_os
 install_dependencies

@@ -301,7 +301,8 @@ show_certificate_info() { echo "RESULT=$IDENTIFIER|$IP_VERSION|$CHALLENGE_MODE";
 ACME_BIN="$TEST_DIR/bin/fake-acme"
 main
 '''
-        result = self.shell(body, '2\n\ntest@example.com\n\ny\n\n')
+        # One extra default choice selects save-only before firewall selection.
+        result = self.shell(body, '2\n\ntest@example.com\n\ny\n\n\n')
         self.assertIn('RESULT=' + V4 + '|4|standalone', result.stdout)
         self.assertIn('FIREWALL_CHOICE=3', result.stdout)
         self.assertIn('--cert-profile shortlived --days 3', (self.base / 'acme.log').read_text())

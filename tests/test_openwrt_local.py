@@ -8,6 +8,8 @@ import os
 from pathlib import Path
 import shlex
 import shutil
+import socket
+import sys
 import subprocess
 import tempfile
 import unittest
@@ -83,8 +85,10 @@ if name=='uci':
     sys.exit(0)
 if name=='uhttpd':
     if os.environ.get('MOCK_RELOAD_FAIL')=='1': sys.exit(23)
+    if args==['restart'] and os.environ.get('MOCK_NO_TLS_START')!='1':
+        sys.exit(subprocess.call([sys.executable,os.environ['TLS_FIXTURE'],'restart',str(p)]))
     sys.exit(0)
-if name=='cron': sys.exit(0)
+if name=='cron': sys.exit(int(os.environ.get('MOCK_CRON_RC','0')))
 if name in ('opkg','apk'):
     sys.exit(1 if os.environ.get('MOCK_PACKAGE_FAIL')=='1' else 0)
 if name=='curl':
@@ -173,8 +177,17 @@ class OpenWrtLocalTests(unittest.TestCase):
                         SSL_RENEWAL_OPENWRT_CRONTAB=str(self.p/'crontab'),
                         PYTHONDONTWRITEBYTECODE='1')
         self.network()
+        with socket.socket() as listener:
+            listener.bind(('127.0.0.1', 0))
+            port = listener.getsockname()[1]
+        library = self.p/'tls-library'; library.touch()
+        self.env['SSL_RENEWAL_OPENWRT_TLS_LIBRARY'] = str(library)
+        self.env['TLS_FIXTURE'] = str(ROOT/'tests/tls_fixture.py')
+        self.addCleanup(lambda: subprocess.run([sys.executable,str(ROOT/'tests/tls_fixture.py'),
+                                               'stop',str(self.p)],check=True))
         self.original_uci = {'uhttpd.main':'uhttpd','uhttpd.main.cert':'/original/cert',
-                             'uhttpd.main.key':'/original/key','uhttpd.main.listen_http':'192.168.2.1:80'}
+                             'uhttpd.main.key':'/original/key','uhttpd.main.listen_http':'192.168.2.1:80',
+                             'uhttpd.main.listen_https':'127.0.0.1:%s'%port}
         (self.p/'uci.json').write_text(json.dumps(self.original_uci))
         self.config()
 
@@ -746,13 +759,16 @@ ow_toggle
         marker=self.p/'openwrt_release';marker.touch()
         install=self.p/'installed'
         source=source.replace('[ -f /etc/openwrt_release ]','[ -f '+shlex.quote(str(marker))+' ]')
-        source=source.replace('TARGET_DIR=/root/.ssl-renewal/openwrt','TARGET_DIR='+shlex.quote(str(install)))
+        source=source.replace('/root/',str(self.p/'root')+'/')
+        source=source.replace('TARGET_DIR='+str(self.p/'root')+'/.ssl-renewal/openwrt','TARGET_DIR='+shlex.quote(str(install)))
         entry=self.p/'entry.sh';entry.write_text(source)
         self.command(self.bin/'id','#!/bin/sh\necho 0\n')
         self.command(self.bin/'curl',r'''#!/usr/bin/env python3
-import pathlib,sys
+import hashlib,pathlib,sys
 args=sys.argv[1:]
-pathlib.Path(args[args.index('-o')+1]).write_text('#!/bin/sh\necho NATIVE_OPENWRT_MENU\n')
+payload='#!/bin/sh\now_main() { :; }\nif [ "${1:-}" = self-test ]; then echo SSL-RENEWAL-OPENWRT-READY-v1; else echo NATIVE_OPENWRT_MENU; fi\n'
+content=(hashlib.sha256(payload.encode()).hexdigest()+'  openwrt_ip_ssl.sh\n') if any(a.endswith('/SHA256SUMS') for a in args) else payload
+pathlib.Path(args[args.index('-o')+1]).write_text(content)
 ''')
         for cmd in ('bash','git','apt-get','yum','dnf'):
             self.command(self.bin/cmd,'#!/bin/sh\necho UNEXPECTED_LINUX_DEPENDENCY >&2\nexit 99\n')

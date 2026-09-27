@@ -39,15 +39,21 @@ exit "${INSTALL_EXIT:-0}"
 
     def downloader(self):
         target = self.bin / 'curl'
-        target.write_text('#!' + self.python + '\n' + '''import os, pathlib, sys
+        target.write_text('#!' + self.python + '\n' + '''import hashlib, os, pathlib, sys
 args = sys.argv[1:]
 assert '--insecure' not in args, args
+native = '#!/bin/sh\\now_main() { :; }\\nif [ "${1:-}" = self-test ]; then echo SSL-RENEWAL-OPENWRT-READY-v1; exit 0; fi\\nIFS= read -r choice\\nprintf "OPENWRT=%s\\\\n" "$choice"\\n'
+if os.environ.get('NATIVE_SYNTAX_BAD') == '1': native += 'if then\\n'
 if args == ['-fsSL', 'https://raw.githubusercontent.com/slobys/SSL-Renewal/main/acme.sh']:
     pathlib.Path(os.environ['TOOL_LOG']).write_text('curl')
     sys.stdout.buffer.write(pathlib.Path(os.environ['PAYLOAD']).read_bytes())
+elif '-o' in args and any(u.endswith('/SHA256SUMS') for u in args):
+    digest = hashlib.sha256(native.encode()).hexdigest()
+    if os.environ.get('MANIFEST_BAD') == '1': digest = '0' * 64
+    pathlib.Path(args[args.index('-o') + 1]).write_text(digest + '  openwrt_ip_ssl.sh\\n')
 elif '-o' in args and any(u.endswith('/openwrt_ip_ssl.sh') for u in args):
-    pathlib.Path(args[args.index('-o') + 1]).write_text(
-        '#!/bin/sh\\nIFS= read -r choice\\nprintf "OPENWRT=%s\\\\n" "$choice"\\n')
+    if os.environ.get('NATIVE_EMPTY') == '1': native = ''
+    pathlib.Path(args[args.index('-o') + 1]).write_text(native)
 else:
     raise AssertionError('Unexpected download: ' + repr(args))
 ''')
@@ -116,7 +122,7 @@ else:
         source = source.replace('/etc/openwrt_release', str(marker))
         source = source.replace('/root/', str(home) + '/')
         self.payload.write_text(source)
-        for name in ('mkdir', 'chmod', 'cp', 'mv', 'install'):
+        for name in ('mkdir', 'chmod', 'cp', 'mv', 'install', 'awk', 'grep', 'sha256sum', 'rmdir'):
             (self.bin / name).symlink_to(shutil.which(name))
         (self.bin / 'id').write_text('#!/bin/sh\necho 0\n')
         (self.bin / 'id').chmod(0o700)
@@ -135,23 +141,87 @@ else:
         self.assertTrue((home / '.ssl-renewal/openwrt/openwrt_ip_ssl.sh').exists())
         self.assertFalse((home / 'acme_3.0.sh').exists())
 
-    def test_real_bootstrap_linux_route(self):
+    def test_empty_component_keeps_installed_program(self):
+        home = self.bootstrap_fixture(True); self.downloader()
+        installed = home / '.ssl-renewal/openwrt/openwrt_ip_ssl.sh'
+        installed.parent.mkdir(parents=True); installed.write_text('old working program')
+        result = self.run_command(expected=1, updates={'NATIVE_EMPTY': '1'})
+        self.assertEqual('old working program', installed.read_text())
+        self.assertNotIn('OPENWRT=', result.stdout)
+
+    def test_checksum_mismatch_keeps_installed_program(self):
+        home = self.bootstrap_fixture(True); self.downloader()
+        installed = home / '.ssl-renewal/openwrt/openwrt_ip_ssl.sh'
+        installed.parent.mkdir(parents=True); installed.write_text('old working program')
+        self.run_command(expected=1, updates={'MANIFEST_BAD': '1'})
+        self.assertEqual('old working program', installed.read_text())
+
+    def test_bad_component_syntax_keeps_installed_program(self):
+        home = self.bootstrap_fixture(True); self.downloader()
+        installed = home / '.ssl-renewal/openwrt/openwrt_ip_ssl.sh'
+        installed.parent.mkdir(parents=True); installed.write_text('old working program')
+        self.run_command(expected=1, updates={'NATIVE_SYNTAX_BAD': '1'})
+        self.assertEqual('old working program', installed.read_text())
+
+    def test_successful_component_update_keeps_previous_copy(self):
+        home = self.bootstrap_fixture(True); self.downloader()
+        installed = home / '.ssl-renewal/openwrt/openwrt_ip_ssl.sh'
+        installed.parent.mkdir(parents=True); installed.write_text('old working program')
+        self.run_command(input_text='0\n')
+        backups = list((home / 'ssl-renewal-backups').glob('update-*/openwrt_ip_ssl.sh'))
+        self.assertEqual(1, len(backups))
+        self.assertEqual('old working program', backups[0].read_text())
+        self.assertFalse((home / '.ssl-renewal/install.lock').exists())
+
+    def linux_bootstrap_fixture(self):
         home = self.bootstrap_fixture(False)
         self.downloader()
         git = self.bin / 'git'
-        git.write_text('#!' + self.python + '\n' + '''import pathlib, sys
+        git.write_text('#!' + self.python + '\n' + '''import hashlib, pathlib, sys
 args = sys.argv[1:]
 assert args[0] == 'clone', args
 repo = pathlib.Path(args[-1]); repo.mkdir(parents=True)
 for name in ('acme.sh', 'acme_3.0.sh', 'dynamic_ip_cert.sh', 'remote_ip_ssl.sh', 'openwrt_ip_ssl.sh'):
-    (repo / name).write_text('#!/bin/sh\\nIFS= read -r choice\\nprintf "LINUX=%s\\\\n" "$choice"\\n')
-(repo / 'uninstall_server.py').write_text('# placeholder for offline installation test\\n')
+    (repo / name).write_text('#!/bin/sh\\now_main() { :; }\\nif [ "${1:-}" = self-test ]; then echo SSL-RENEWAL-OPENWRT-READY-v1; exit 0; fi\\nIFS= read -r choice\\nprintf "LINUX=%s\\\\n" "$choice"\\n')
+(repo / 'uninstall_server.py').write_text('# SSL-Renewal server uninstaller: offline fixture\\n')
+(repo / 'SHA256SUMS').write_text(''.join(hashlib.sha256(p.read_bytes()).hexdigest()+'  '+p.name+'\\n' for p in sorted(repo.iterdir())))
 ''')
         git.chmod(0o700)
+        return home
+
+    def test_real_bootstrap_linux_route(self):
+        home = self.linux_bootstrap_fixture()
+        state = home / '.ssl-renewal'; state.mkdir()
+        (state / 'server.uninstalled').touch()
+        (state / 'unrelated-marker').write_text('keep')
         result = self.run_command(input_text='5\n')
         self.assertIn('LINUX=5', result.stdout)
         self.assertTrue((home / 'acme_3.0.sh').exists())
+        self.assertTrue((home / 'uninstall_server.py').is_file())
+        self.assertFalse((state / 'server.uninstalled').exists())
+        self.assertEqual('keep', (state / 'unrelated-marker').read_text())
         self.assertFalse((home / '.ssl-renewal/openwrt').exists())
+
+    def test_linux_partial_publish_failure_restores_all_old_programs(self):
+        home = self.linux_bootstrap_fixture()
+        names = ('acme.sh', 'acme_3.0.sh', 'dynamic_ip_cert.sh', 'remote_ip_ssl.sh',
+                 'openwrt_ip_ssl.sh', 'uninstall_server.py')
+        for name in names:
+            (home / name).write_text('old working ' + name)
+        replacement = self.bin / 'mv'
+        replacement.unlink()  # Do NOT follow the executable symlink when mocking.
+        replacement.write_text('#!/bin/sh\n'
+            'case "$2" in *.sslrenewal-new.*) case "$2" in */acme_3.0.sh.*) exit 33;; esac;; esac\n'
+            'exec ' + shlex.quote(shutil.which('mv')) + ' "$@"\n')
+        replacement.chmod(0o700)
+        # publish_file deliberately normalizes the underlying mv error to 1.
+        result = self.run_command(expected=1)
+        self.assertNotIn('LINUX=', result.stdout)
+        for name in names:
+            self.assertEqual('old working ' + name, (home / name).read_text())
+        self.assertFalse((home / '.ssl-renewal/install.lock').exists())
+        self.assertFalse(list(home.glob('*.sslrenewal-new.*')))
+
 
 
 if __name__ == '__main__':
