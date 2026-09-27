@@ -31,6 +31,9 @@ PORT443_STATE="unknown"
 PORT80_LISTENERS=""
 PORT443_LISTENERS=""
 RECOMMENDED_CHALLENGE=""
+REUSE_EXISTING_CERT=0
+FORCE_FRESH_ISSUE=0
+CERT_RESULT_MODE="issued"
 
 die() {
     echo "❌ $*"
@@ -512,9 +515,76 @@ select_server_deployment() {
     done
 }
 
+existing_certificate_valid() {
+    [ -s "$CERT_PATH" ] && [ -s "$KEY_PATH" ] || return 1
+    command -v openssl >/dev/null 2>&1 || return 1
+
+    local min_validity=86400
+    [ "$CERT_KIND" != "ip" ] || min_validity=259200
+    openssl x509 -in "$CERT_PATH" -noout -checkend "$min_validity" >/dev/null 2>&1 || return 1
+
+    if [ "$CERT_KIND" = "ip" ]; then
+        openssl x509 -in "$CERT_PATH" -noout -checkip "$IDENTIFIER" >/dev/null 2>&1 || return 1
+    else
+        openssl x509 -in "$CERT_PATH" -noout -checkhost "$IDENTIFIER" >/dev/null 2>&1 || return 1
+    fi
+
+    local cert_pub key_pub rc=0
+    cert_pub="$(mktemp)" || return 1
+    key_pub="$(mktemp)" || { rm -f "$cert_pub"; return 1; }
+    openssl x509 -in "$CERT_PATH" -pubkey -noout > "$cert_pub" 2>/dev/null || rc=1
+    [ "$rc" -ne 0 ] || openssl pkey -in "$KEY_PATH" -pubout > "$key_pub" 2>/dev/null || rc=1
+    [ "$rc" -ne 0 ] || cmp -s "$cert_pub" "$key_pub" || rc=1
+    rm -f "$cert_pub" "$key_pub"
+    return "$rc"
+}
+
+select_existing_certificate_action() {
+    REUSE_EXISTING_CERT=0
+    FORCE_FRESH_ISSUE=0
+    CERT_RESULT_MODE="issued"
+
+    existing_certificate_valid || return 0
+
+    local choice expiry
+    expiry="$(openssl x509 -in "$CERT_PATH" -noout -enddate 2>/dev/null | cut -d= -f2- || true)"
+    while true; do
+        echo
+        echo "============== 检测到本地现有证书 =============="
+        echo "证书：$CERT_PATH"
+        echo "私钥：$KEY_PATH"
+        [ -z "$expiry" ] || echo "到期：$expiry"
+        echo "该证书与当前目标 $IDENTIFIER 匹配，且证书/私钥配对正常。"
+        echo "1）直接使用本地现有证书【默认，不重新做 ACME 验证】"
+        if [ "$CERT_KIND" = "ip" ]; then
+            echo "2）按刚才选择的 $CHALLENGE_MODE 方式重新验证并签发【会强制请求新证书】"
+        else
+            echo "2）按当前验证方式重新验证并签发【会强制请求新证书】"
+        fi
+        echo "0）取消"
+        read -r -p "请选择 [1]： " choice || return 1
+        case "${choice:-1}" in
+            1)
+                REUSE_EXISTING_CERT=1
+                CERT_RESULT_MODE="reused"
+                echo "ℹ️ 将直接使用现有证书；刚才填写的 Webroot/验证方式本次不会参与签发。"
+                return 0
+                ;;
+            2)
+                FORCE_FRESH_ISSUE=1
+                echo "⚠️ 将强制重新签发，并实际执行当前验证方式；这会消耗 CA 请求额度。"
+                return 0
+                ;;
+            0) return 1 ;;
+            *) echo "无效选项。" ;;
+        esac
+    done
+}
+
 issue_static_certificate() {
     local issue_args
     issue_args=(--issue -d "$IDENTIFIER" --server "$CA_SERVER" --keylength ec-256)
+    [ "$FORCE_FRESH_ISSUE" != 1 ] || issue_args+=(--force)
 
     if [ "$CERT_KIND" = "ip" ]; then
         issue_args+=(--cert-profile shortlived --days 3)
@@ -542,6 +612,18 @@ issue_static_certificate() {
         issue_args+=(--standalone)
     fi
 
+    if [ "$REUSE_EXISTING_CERT" = 1 ]; then
+        echo
+        echo "♻️ 已选择直接使用本地现有证书，本次不向 CA 发起签发请求。"
+        echo "📂 正在通过 acme.sh 保持证书路径，并同步当前续期重载设置..."
+        local reuse_install_args=(--install-cert -d "$IDENTIFIER" --ecc
+            --key-file "$KEY_PATH" --fullchain-file "$CERT_PATH"
+            --reloadcmd "${RELOAD_CMD:-:}")
+        "$ACME_BIN" "${reuse_install_args[@]}" ||
+            die "现有证书文件保持不变，但 acme.sh 无法重新登记；可改选强制重新签发。"
+        return 0
+    fi
+
     echo
     echo "🚀 开始申请证书..."
     local issue_rc=0
@@ -563,7 +645,11 @@ issue_static_certificate() {
 show_certificate_info() {
     echo
     echo "============== 申请完成 =============="
-    echo "✅ 证书文件已安装（含复用已有证书的情况）。"
+    if [ "$CERT_RESULT_MODE" = "reused" ]; then
+        echo "✅ 已直接使用本地现有证书；本次未重新向 CA 签发。"
+    else
+        echo "✅ 证书文件已安装。"
+    fi
     echo "📄 证书路径: $CERT_PATH"
     echo "🔐 私钥路径: $KEY_PATH"
     if [ -n "$RELOAD_CMD" ]; then
@@ -1059,7 +1145,6 @@ else
 fi
 
 select_server_deployment || { echo "已取消，未申请证书。"; return 0; }
-select_firewall_action
 detect_os
 install_dependencies
 ensure_webroot
@@ -1092,9 +1177,18 @@ SAFE_NAME="${SAFE_NAME//\//_}"
 KEY_PATH="/root/${SAFE_NAME}.key"
 CERT_PATH="/root/${SAFE_NAME}.crt"
 
+ensure_acme
+select_existing_certificate_action || { echo "已取消，未修改现有证书。"; return 0; }
+
+if [ "$REUSE_EXISTING_CERT" = 1 ]; then
+    issue_static_certificate
+    show_certificate_info
+    return 0
+fi
+
+select_firewall_action
 check_challenge_port
 configure_firewall
-ensure_acme
 register_account
 issue_static_certificate
 show_certificate_info
